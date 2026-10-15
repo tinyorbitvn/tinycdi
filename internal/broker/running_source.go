@@ -1,0 +1,179 @@
+package broker
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
+	"github.com/tinyorbitvn/tinycdi/internal/operator"
+	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
+)
+
+// K8sRunningSource is the production RunningSource for the ExpiryPlanner:
+// it lists Workspace CRs through the same informer cache as
+// K8sBindingSource and projects each workspace whose current runtime
+// generation is Ready (desired Running, status.startedAt set) into a
+// RunningWorkspace. The TimeoutPolicy comes from the workspace's
+// WorkspaceTemplate lifecycle defaults in the same namespace; a missing
+// template or a zero field falls back to DefaultTimeoutPolicy so a broken
+// reference never disables the caps.
+type K8sRunningSource struct {
+	cache crcache.Cache
+}
+
+// NewK8sRunningSource builds the running-set projection on the given cache.
+func NewK8sRunningSource(c crcache.Cache) *K8sRunningSource {
+	return &K8sRunningSource{cache: c}
+}
+
+// RunningWorkspaces implements RunningSource.
+func (s *K8sRunningSource) RunningWorkspaces(ctx context.Context) ([]RunningWorkspace, error) {
+	var list cdiv1.WorkspaceList
+	if err := s.cache.List(ctx, &list,
+		client.HasLabels{provisioning.LabelWorkspaceUID}); err != nil {
+		return nil, fmt.Errorf("broker: list running workspaces: %w", err)
+	}
+	var out []RunningWorkspace
+	for i := range list.Items {
+		ws := &list.Items[i]
+		if ws.Spec.DesiredState != cdiv1.DesiredStateRunning ||
+			ws.Status.Phase != cdiv1.WorkspacePhaseReady ||
+			ws.Status.StartedAt == nil {
+			continue
+		}
+		out = append(out, RunningWorkspace{
+			WorkspaceUID:      provisioning.PlatformID(ws.Labels[provisioning.LabelWorkspaceUID]),
+			RuntimeGeneration: uint64(ws.Status.ObservedRuntimeGeneration),
+			StartedAt:         ws.Status.StartedAt.Time,
+			Policy:            s.policyFor(ctx, ws),
+		})
+	}
+	return out, nil
+}
+
+// OperatorStoppedWorkspaces implements OperatorStoppedSource: workspaces whose
+// CR still holds the Running intent the row pinned but whose applied intent
+// the operator flipped to Stopped (its max-duration backstop).
+func (s *K8sRunningSource) OperatorStoppedWorkspaces(ctx context.Context) ([]OperatorStopped, error) {
+	var list cdiv1.WorkspaceList
+	if err := s.cache.List(ctx, &list,
+		client.HasLabels{provisioning.LabelWorkspaceUID}); err != nil {
+		return nil, fmt.Errorf("broker: list operator-stopped workspaces: %w", err)
+	}
+	var out []OperatorStopped
+	for i := range list.Items {
+		ws := &list.Items[i]
+		if ws.Spec.DesiredState != cdiv1.DesiredStateRunning ||
+			ws.Status.Phase != cdiv1.WorkspacePhaseStopped {
+			continue
+		}
+		raw := ws.Annotations[operator.AnnotationAppliedIntent]
+		if raw == "" {
+			continue
+		}
+		var applied operator.AppliedIntent
+		if err := json.Unmarshal([]byte(raw), &applied); err != nil {
+			continue
+		}
+		// The exact signature of the operator's backstop: the applied record
+		// is the spec's own intent (same revision and runtime generation)
+		// flipped to Stopped. Anything looser is somebody else's stop.
+		if applied.DesiredState != cdiv1.DesiredStateStopped ||
+			applied.Revision != ws.Spec.IntentRevision ||
+			applied.RuntimeGeneration != ws.Spec.RuntimeGeneration ||
+			ws.Status.LastAppliedIntentRevision != applied.Revision {
+			continue
+		}
+		out = append(out, OperatorStopped{
+			WorkspaceUID:      provisioning.PlatformID(ws.Labels[provisioning.LabelWorkspaceUID]),
+			RuntimeGeneration: uint64(ws.Spec.RuntimeGeneration),
+			IntentRevision:    uint64(ws.Spec.IntentRevision),
+		})
+	}
+	return out, nil
+}
+
+// policyFor resolves the lifecycle budget the expiry planner enforces on
+// one workspace. The broker owns expiry decisions and plans them from the
+// workspace's OWN recorded contract: the template snapshot the operator
+// recorded at first admit. A template re-published after admit must not
+// change a running generation's caps — that is also the input the
+// operator's max-duration backstop converges on, so the two owners of the
+// stop decision can never disagree. A workspace without a recorded
+// snapshot (never admitted, or its status was lost) resolves its
+// templateRef through the shared by-name resolver — a reference to a
+// catalog base name resolves to the newest revision — and a missing or
+// unresolvable template falls back to DefaultTimeoutPolicy, so a broken
+// reference never disables the caps.
+//
+// Held workspaces (snapshotHeld — status.templateSnapshot still empty and
+// the operator's Degraded/TemplateRevisionGone or TemplateInvalid
+// condition present) take their caps from the resolved template's
+// lifecycle and the chart defaults, the STRICTER of the two per cap — an
+// annotation carrying an inflated cap can never stretch a held session.
+func (s *K8sRunningSource) policyFor(ctx context.Context, ws *cdiv1.Workspace) TimeoutPolicy {
+	held := snapshotHeld(ws)
+	lc := s.lifecycleFor(ctx, ws)
+	pol := DefaultTimeoutPolicy
+	if lc == nil {
+		return pol
+	}
+	if d := lc.IdleTimeout.Duration; d > 0 && (!held || d < pol.IdleTimeout) {
+		pol.IdleTimeout = d
+	}
+	if d := lc.DisconnectTimeout.Duration; d > 0 && (!held || d < pol.DisconnectTimeout) {
+		pol.DisconnectTimeout = d
+	}
+	if d := lc.MaxDuration.Duration; d > 0 && (!held || d < pol.MaxDuration) {
+		pol.MaxDuration = d
+	}
+	return pol
+}
+
+// snapshotHeld reports whether the operator has placed the workspace on
+// a template hold: status.templateSnapshot is still empty AND a
+// Degraded=True condition latches one of the template-source reasons
+// (TemplateRevisionGone, TemplateInvalid).
+func snapshotHeld(ws *cdiv1.Workspace) bool {
+	if ws.Status.TemplateSnapshot != nil {
+		return false
+	}
+	c := meta.FindStatusCondition(ws.Status.Conditions, cdiv1.ConditionDegraded)
+	return c != nil && c.Status == metav1.ConditionTrue &&
+		(c.Reason == operator.ReasonTemplateRevisionGone ||
+			c.Reason == operator.ReasonTemplateInvalid)
+}
+
+// lifecycleFor returns the recorded snapshot lifecycle, else the resolved
+// template's, else nil. Only the operator-recorded status.templateSnapshot
+// is trusted (workspaces/status is writable by the operator service
+// account alone); the annotation mirror is never read.
+func (s *K8sRunningSource) lifecycleFor(ctx context.Context, ws *cdiv1.Workspace) *cdiv1.LifecycleDefaults {
+	if snap := ws.Status.TemplateSnapshot; snap != nil &&
+		snap.Spec.Lifecycle != (cdiv1.LifecycleDefaults{}) {
+		lc := snap.Spec.Lifecycle
+		return &lc
+	}
+	if tpl := s.template(ctx, ws); tpl != nil {
+		return &tpl.Spec.Lifecycle
+	}
+	return nil
+}
+
+// template finds the WorkspaceTemplate a workspace references through the
+// shared by-name resolver (exact object, else newest catalog-name
+// revision); nil when neither exists or the lookup errors — a broken
+// reference falls back to DefaultTimeoutPolicy rather than disabling caps.
+func (s *K8sRunningSource) template(ctx context.Context, ws *cdiv1.Workspace) *cdiv1.WorkspaceTemplate {
+	tpl, err := provisioning.ResolveTemplateByName(ctx, s.cache, ws.Namespace, ws.Spec.TemplateRef.Name)
+	if err != nil {
+		return nil
+	}
+	return tpl
+}

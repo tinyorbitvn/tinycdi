@@ -1,0 +1,116 @@
+# Seeded WorkspaceTemplates — the runtime catalog. spec passes through
+# (the CRD validates it: digest-pinned image, enum fields, ...) except
+# two chart fills: spec.linux.image resolves from `image:`/images keys,
+# and spec.linux.adapter is rendered explicitly ("" is the value the API
+# server would store anyway — GitOps diffing then shows no drift). Once
+# created, CEL makes spec immutable. So every distinct rendered
+# content becomes a NEW revision object instead of an in-place mutation:
+# metadata.name is "<name>-<hash8>" where hash8 = sha256 of the rendered
+# spec + effective annotations. A values change renders a new name; helm
+# creates the new revision and deletes the superseded one — upgrades and
+# rollbacks never touch a live template's spec. The catalog-name label
+# ties the revisions of one logical template together: the API resolves
+# tpl_<name> (and lists) to the newest published revision.
+#
+# Per-entry structured fields map to the annotations the runtime backend
+# honors (internal/runtime/linux/backend.go). Pod placement lives in the
+# typed spec.placement block, with unset fields falling back to the
+# operator defaults rendered from runtime.placement.
+#   image:           key into .Values.images (e.g. "linuxDesktop",
+#                    "browser") or a literal reference; used when
+#                    spec.linux.image is empty. Runtime images must be
+#                    digest-pinned — the CRD rejects tag-only references.
+#   imageBuiltAt:    -> workspaces.cdi.tinyorbit.vn/image-built-at for literal
+#                    image references (entries using an images key take
+#                    images.<key>.builtAt instead; images.<key>.engines.*
+#                    likewise render as image-chromium/image-firefox)
+#   seccompProfile:  -> workspaces.cdi.tinyorbit.vn/seccomp-profile: localhost/<name>
+#   appArmorProfile: -> workspaces.cdi.tinyorbit.vn/apparmor-profile: localhost/<name>
+#   storageClass:    -> workspaces.cdi.tinyorbit.vn/storage-class
+#                    (falls back to the top-level storageClass value)
+#   annotations:     -> extra annotations, verbatim
+{{- range .Values.templates }}
+{{- $tplName := required "templates[].name is required" .name }}
+{{- $ns := required "templates[].namespace must be a managed namespace" .namespace }}
+{{- $spec := required "templates[].spec is required" .spec | deepCopy }}
+{{- $ann := dict }}
+{{- range $k, $v := (default dict .annotations) }}
+{{- $_ := set $ann $k $v }}
+{{- end }}
+{{- $linux := get $spec "linux" | default dict }}
+{{- if and (hasKey $spec "linux") (not (get $linux "image")) }}
+{{- if not .image }}
+{{- fail (printf "templates[%s]: spec.linux.image is required (set spec.linux.image or the `image:` shorthand)" $tplName) }}
+{{- end }}
+{{- $ref := .image }}
+{{- if hasKey $.Values.images $ref }}
+{{- $ref = include "tinycdi.image" (dict "image" (index $.Values.images $ref) "root" $) }}
+{{- end }}
+{{- $_ := set $linux "image" $ref }}
+{{- $_ := set $spec "linux" $linux }}
+{{- end }}
+{{- /* spec.linux.adapter defaults to "" on the API server (CRD schema
+     default); render it explicitly so GitOps diffing (Argo CD, Flux)
+     shows no drift on the stored object. */ -}}
+{{- if and (hasKey $spec "linux") (not (hasKey $linux "adapter")) }}
+{{- $_ := set $linux "adapter" "" }}
+{{- end }}
+{{- $builtAt := .imageBuiltAt | default "" }}
+{{- $eng := dict }}
+{{- if and .image (hasKey $.Values.images .image) }}
+{{- $builtAt = (index $.Values.images .image).builtAt | default "" }}
+{{- $eng = (index $.Values.images .image).engines | default dict }}
+{{- end }}
+{{- if and $builtAt (not (index $ann "workspaces.cdi.tinyorbit.vn/image-built-at")) }}
+{{- $_ := set $ann "workspaces.cdi.tinyorbit.vn/image-built-at" $builtAt }}
+{{- end }}
+{{- /* Browser engine versions the image ships (runtime-images.json);
+     rendered as annotations so the template view's stale-image display
+     can show both engines. An explicit annotations: entry wins. */ -}}
+{{- range $engine := list "chromium" "firefox" }}
+{{- $ver := get $eng $engine | toString }}
+{{- $key := printf "workspaces.cdi.tinyorbit.vn/image-%s" $engine }}
+{{- if and $ver (not (index $ann $key)) }}
+{{- $_ := set $ann $key $ver }}
+{{- end }}
+{{- end }}
+{{- if .seccompProfile }}
+{{- $_ := set $ann "workspaces.cdi.tinyorbit.vn/seccomp-profile" (printf "localhost/%s" (.seccompProfile | trimPrefix "localhost/")) }}
+{{- end }}
+{{- /* The userns browser seccomp profile lets the workspace user create
+     user and network namespaces; the operator admits it only when the
+     pod runs in its own user namespace. Fail the render the same way:
+     effective hostUsers is spec.linux.hostUsers, else runtime.hostUsers. */ -}}
+{{- if eq (index $ann "workspaces.cdi.tinyorbit.vn/seccomp-profile" | default "") "localhost/profiles/chromium-userns.json" }}
+{{- $hostUsers := $.Values.runtime.hostUsers }}
+{{- if and (hasKey $linux "hostUsers") (not (kindIs "invalid" (index $linux "hostUsers"))) }}
+{{- $hostUsers = index $linux "hostUsers" }}
+{{- end }}
+{{- if not (and (kindIs "bool" $hostUsers) (not $hostUsers)) }}
+{{- fail (printf "templates[%s]: seccompProfile localhost/profiles/chromium-userns.json allows unprivileged user namespaces and requires hostUsers: false (set spec.linux.hostUsers: false or runtime.hostUsers: false)" $tplName) }}
+{{- end }}
+{{- end }}
+{{- if .appArmorProfile }}
+{{- $_ := set $ann "workspaces.cdi.tinyorbit.vn/apparmor-profile" (printf "localhost/%s" (.appArmorProfile | trimPrefix "localhost/")) }}
+{{- end }}
+{{- $sc := .storageClass | default $.Values.storageClass }}
+{{- if and $sc (not (index $ann "workspaces.cdi.tinyorbit.vn/storage-class")) }}
+{{- $_ := set $ann "workspaces.cdi.tinyorbit.vn/storage-class" $sc }}
+{{- end }}
+{{- $hash := sha256sum (printf "%s\n%s" (toYaml $spec) (toYaml $ann)) | trunc 8 }}
+---
+apiVersion: workspaces.cdi.tinyorbit.vn/v1
+kind: WorkspaceTemplate
+metadata:
+  name: {{ printf "%s-%s" $tplName $hash | trunc 63 | trimSuffix "-" }}
+  namespace: {{ $ns }}
+  labels:
+    workspaces.cdi.tinyorbit.vn/catalog-name: {{ $tplName }}
+    {{- include "tinycdi.labels" $ | nindent 4 }}
+  {{- with $ann }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- toYaml $spec | nindent 2 }}
+{{- end }}

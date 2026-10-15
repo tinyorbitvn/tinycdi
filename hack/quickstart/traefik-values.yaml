@@ -1,0 +1,36 @@
+# Traefik ingress controller for the quickstart (DEV ONLY).
+# up.sh adds image.digest/versionOverride from the pins in common.sh.
+deployment:
+  replicas: 1
+service:
+  spec:
+    type: NodePort
+ports:
+  web:
+    nodePort: 30080
+  websecure:
+    nodePort: 30443
+providers:
+  kubernetesCRD:
+    enabled: false
+  kubernetesIngress:
+    enabled: true
+    publishedService:
+      enabled: false
+ingressClass:
+  enabled: true
+  isDefaultClass: false
+  name: traefik
+# The TinyCDI backends and the frontend terminate TLS themselves with the
+# quickstart's local CA; Traefik re-encrypts to them and does not verify the
+# pod certificates (their names are Service-internal). Loopback dev only.
+additionalArguments:
+  - "--serversTransport.insecureSkipVerify=true"
+  - "--ping"
+log:
+  level: INFO
+accessLog:
+  enabled: false
+resources:
+  requests: {cpu: 50m, memory: 64Mi}
+  limits: {cpu: "1", memory: 256Mi}

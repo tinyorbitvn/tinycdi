@@ -1,0 +1,660 @@
+// Package broker owns launch tickets, connection leases and session-target
+// resolution for interactive workspace sessions (design §6).
+package broker
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"sync"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"k8s.io/apimachinery/pkg/types"
+
+	"github.com/tinyorbitvn/tinycdi/internal/api"
+	"github.com/tinyorbitvn/tinycdi/internal/observability"
+	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
+	"github.com/tinyorbitvn/tinycdi/internal/store"
+)
+
+// ErrNotImplemented marks behaviour not yet implemented.
+var ErrNotImplemented = errors.New("broker: not implemented")
+
+// Domain errors the contract tests discriminate on. Implementations must
+// return these (wrapped is fine) rather than ad-hoc strings.
+var (
+	// ErrTicketInvalid — ticket unknown, already consumed, wrong audience or
+	// otherwise unredeemable.
+	ErrTicketInvalid = errors.New("broker: ticket invalid or already used")
+	// ErrTicketExpired — ticket past its 60 s TTL; the attempt still consumes it.
+	ErrTicketExpired = errors.New("broker: ticket expired")
+	// ErrDenied — authenticated but not permitted (foreign gateway identity,
+	// foreign tenant binding, lease ownership or revoked generation). A
+	// workspace owned by another user of the same tenant is ErrNotFound.
+	ErrDenied = errors.New("broker: denied")
+	// ErrStaleBinding — the fence presented by the gateway no longer matches
+	// the current incarnation (stale runtimeGeneration or runtimeUID).
+	ErrStaleBinding = errors.New("broker: stale runtime binding")
+	// ErrOwnerTabInvalid — a stream claim without a well-formed tab id
+	// (32 lowercase hex). Every claim names the claiming tab.
+	ErrOwnerTabInvalid = errors.New("broker: stream claim needs a 32-hex tab id")
+	// ErrConnectionInUse — a live interactive lease exists and the ticket was
+	// not issued with takeover.
+	ErrConnectionInUse = errors.New("broker: workspace already has an active lease")
+	// ErrLeaseInvalid — lease unknown, expired, revoked or superseded.
+	ErrLeaseInvalid = errors.New("broker: lease invalid or expired")
+	// ErrRevoked — ticket or lease explicitly revoked.
+	ErrRevoked = errors.New("broker: revoked")
+	// ErrFreshness — the binding source's observed state is older than the
+	// 15 s freshness budget; issuing/renewing must stop until fresh again.
+	ErrFreshness = errors.New("broker: observed runtime state too stale")
+	// ErrNotReady — the workspace is not in a connectable phase.
+	ErrNotReady = errors.New("broker: workspace not ready")
+	// ErrNotFound — workspace unknown or not visible to the principal's tenant.
+	ErrNotFound = errors.New("broker: not found")
+)
+
+// Contract constants from design §6.
+const (
+	// TicketTTL is the launch-ticket lifetime; tickets are single-use.
+	TicketTTL = 60 * time.Second
+	// LeaseTTL is the sliding lease lifetime; the gateway renews well inside it.
+	LeaseTTL = 30 * time.Second
+	// LeaseRenewInterval is the expected gateway renew cadence.
+	LeaseRenewInterval = 10 * time.Second
+	// MaxBindingAge is the freshness budget for operator-observed state;
+	// beyond it the broker must stop issuing and renewing (fail closed).
+	MaxBindingAge = 15 * time.Second
+
+	// DefaultGatewayAudience is the audience tickets bind to when no
+	// -gateway-audience/session origin is configured; deployments override it.
+	DefaultGatewayAudience = "session.example.dev"
+
+	// PhaseReady is the Workspace phase that permits issuing tickets
+	// (mirrors api/v1.WorkspacePhaseReady — kept as a string so the
+	// broker does not depend on the CRD types for its core contract).
+	PhaseReady = "Ready"
+)
+
+// Clock lets tests drive expiry deterministically.
+type Clock interface {
+	Now() time.Time
+}
+
+type systemClock struct{}
+
+func (systemClock) Now() time.Time { return time.Now() }
+
+// Option configures a Broker.
+type Option func(*Broker)
+
+// WithClock injects a clock (fake in tests).
+func WithClock(c Clock) Option { return func(b *Broker) { b.clock = c } }
+
+// WithTicketTTL overrides TicketTTL.
+func WithTicketTTL(d time.Duration) Option { return func(b *Broker) { b.ticketTTL = d } }
+
+// WithLeaseTTL overrides LeaseTTL.
+func WithLeaseTTL(d time.Duration) Option { return func(b *Broker) { b.leaseTTL = d } }
+
+// WithMaxBindingAge overrides MaxBindingAge.
+func WithMaxBindingAge(d time.Duration) Option { return func(b *Broker) { b.maxBindingAge = d } }
+
+// WithSessionIdle sets the portal session idle window the lease layer
+// honours (FIX-IDLE / SR-1-F2): a bound session whose last_seen_at is
+// older than d fails the liveness re-checks on redeem, renew and
+// rehydrate, matching the window RequireAuth enforces on the session
+// itself. <=0 disables the idle clause — the epoch and absolute-expiry
+// checks still apply.
+func WithSessionIdle(d time.Duration) Option { return func(b *Broker) { b.sessionIdle = d } }
+
+// WithGatewayAudience sets the session-gateway audience tickets are bound to.
+// The gateway's mTLS identity maps to this audience at the internal API.
+func WithGatewayAudience(aud string) Option {
+	return func(b *Broker) { b.audience = aud }
+}
+
+// WithCredentialSource sets the resolver for per-workspace runtime
+// credentials (production: the K8s Secret reader). When unset, the broker
+// derives deterministic per-workspace material that fails closed upstream —
+// it exists so the unit contract runs without Kubernetes, never to serve
+// real sessions.
+func WithCredentialSource(src CredentialSource) Option {
+	return func(b *Broker) { b.creds = src }
+}
+
+// WithMetrics attaches the platform metric set: the broker counts leases it
+// revokes because the bound portal session is gone or invalid
+// (tinycdi_lease_session_missing_total). Nil disables the count.
+func WithMetrics(m *observability.Metrics) Option {
+	return func(b *Broker) { b.metrics = m }
+}
+
+// WithLogger attaches the logger for broker-initiated lease revocations
+// (the one-line record emitted when a bound portal session check fails).
+// Nil disables it.
+func WithLogger(l *slog.Logger) Option {
+	return func(b *Broker) { b.log = l }
+}
+
+// PlatformID is the platform workspace identity ("ws_<hex>") the broker
+// and the DB route on — aliased because the broker speaks it natively.
+// The Workspace CR's metadata.uid (RuntimeBinding.CRUID / linux.CRUID) is
+// a different identity used only for Kubernetes object names; mixing the
+// two is a compile error.
+type PlatformID = provisioning.PlatformID
+
+// BindingSource supplies the operator-reported incarnation of a workspace.
+// The production implementation projects Workspace CR status (bindings.go);
+// tests inject a fake.
+type BindingSource interface {
+	CurrentBinding(ctx context.Context, workspaceUID PlatformID) (RuntimeBinding, error)
+}
+
+// RuntimeBinding is the current runtime incarnation as observed by the
+// operator. Tickets and leases bind the triple (WorkspaceUID,
+// RuntimeGeneration, RuntimeUID): a recreated runtime changes RuntimeUID and
+// auto-fences access granted to the old incarnation.
+type RuntimeBinding struct {
+	// WorkspaceUID is the platform id (ws_…) — the identity tickets and
+	// leases are bound to. It never names a Kubernetes object.
+	WorkspaceUID PlatformID
+	// CRUID is the Workspace CR's metadata.uid — the identity the operator
+	// names the runtime children (ws-<cruid>, ws-<cruid>-rt, …) from. It is
+	// the ONLY input credential/target resolution may derive Kubernetes
+	// object names from.
+	CRUID             types.UID
+	TenantID          string
+	OwnerSubject      string // iss|sub of the workspace owner
+	Phase             string // "Ready" required to issue
+	RuntimeGeneration uint64
+	RuntimeUID        string
+	ObservedAt        time.Time // must be within MaxBindingAge of Now()
+
+	// Namespace/ServiceName/ServicePort project metadata.namespace and
+	// status.serviceRef for target resolution; empty when unknown.
+	Namespace   string
+	ServiceName string
+	ServicePort int32
+}
+
+// GatewayIdentity is the authenticated session-gateway caller (mTLS-derived).
+type GatewayIdentity struct {
+	ID       string // unique gateway instance identity
+	Audience string // audience the ticket/lease is bound to
+}
+
+// Ticket is the launch ticket returned to the caller by IssueTicket. Token is
+// opaque (~256 bits); it is delivered in the response body only, never in a
+// URL query string, and only its SHA-256 hash is persisted.
+type Ticket struct {
+	WorkspaceID PlatformID
+	Token       string
+	ExpiresAt   time.Time
+}
+
+// Broker issues tickets and manages connection leases over the control-plane
+// store, bound to the current runtime incarnation reported by BindingSource.
+type Broker struct {
+	db            *store.DB
+	src           BindingSource
+	clock         Clock
+	ticketTTL     time.Duration
+	leaseTTL      time.Duration
+	maxBindingAge time.Duration
+	audience      string
+	creds         CredentialSource
+	// sessionIdle is the portal session's sliding inactivity window: a
+	// bound session whose last_seen_at is older than it fails the lease
+	// layer's liveness re-check, so an idled-out session can neither mint
+	// (redeem) nor keep (renew) nor rebuild (rehydrate) a stream
+	// (FIX-IDLE / SR-1-F2). <=0 disables the idle clause — the epoch and
+	// absolute-expiry checks still apply.
+	sessionIdle time.Duration
+	// metrics counts broker-initiated lease revocations on a dead portal
+	// session; nil disables them.
+	metrics *observability.Metrics
+	// log emits the one-line records for those revocations; nil disables.
+	log *slog.Logger
+	// inputHook is invoked with the lease's principal and bound portal
+	// session digest on each recorded "input" activity event (D18); nil
+	// disables it.
+	inputHook func(ctx context.Context, principal, sessionDigest string)
+	// transferPolicy re-resolves the file-transfer policy at claim time;
+	// nil refuses every claim (fail closed).
+	transferPolicy TransferPolicyResolver
+
+	synthOnce  sync.Once
+	synthCreds *synthesizedCredentials
+	synthErr   error
+}
+
+// New returns a Broker. src is required for issue/renew/resolve; db is
+// required for every operation.
+func New(db *store.DB, src BindingSource, opts ...Option) *Broker {
+	b := &Broker{
+		db:            db,
+		src:           src,
+		clock:         systemClock{},
+		ticketTTL:     TicketTTL,
+		leaseTTL:      LeaseTTL,
+		maxBindingAge: MaxBindingAge,
+		audience:      DefaultGatewayAudience,
+	}
+	for _, o := range opts {
+		o(b)
+	}
+	return b
+}
+
+// now is the single clock read for an operation.
+func (b *Broker) now() time.Time { return b.clock.Now() }
+
+// fresh reports whether the binding's observation is inside the freshness
+// budget. Future-dated observations are tolerated (clock skew), zero never is.
+func (b *Broker) fresh(binding RuntimeBinding, now time.Time) error {
+	if binding.ObservedAt.IsZero() || now.Sub(binding.ObservedAt) > b.maxBindingAge {
+		return ErrFreshness
+	}
+	return nil
+}
+
+// currentBinding resolves and freshness-checks the binding for wsUID.
+func (b *Broker) currentBinding(ctx context.Context, wsUID PlatformID, now time.Time) (RuntimeBinding, error) {
+	if b.src == nil {
+		return RuntimeBinding{}, ErrFreshness
+	}
+	binding, err := b.src.CurrentBinding(ctx, wsUID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return RuntimeBinding{}, ErrNotFound
+		}
+		if errors.Is(err, ErrFreshness) {
+			return RuntimeBinding{}, ErrFreshness
+		}
+		return RuntimeBinding{}, fmt.Errorf("broker: binding lookup: %w", err)
+	}
+	if err := b.fresh(binding, now); err != nil {
+		return RuntimeBinding{}, err
+	}
+	return binding, nil
+}
+
+func randToken() (string, error) {
+	return randID("tkt_")
+}
+
+func randID(prefix string) (string, error) {
+	var raw [32]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	return prefix + base64.RawURLEncoding.EncodeToString(raw[:]), nil
+}
+
+func ticketHash(opaque string) []byte {
+	sum := sha256.Sum256([]byte(opaque))
+	return sum[:]
+}
+
+// requestID pulls the request-scoped correlation ID when the caller went
+// through the API middleware, else mints one for internal callers.
+func requestID(ctx context.Context) string {
+	if id := api.RequestIDFromContext(ctx); id != "" {
+		return id
+	}
+	var raw [8]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "req-unknown"
+	}
+	return "req-" + base64.RawURLEncoding.EncodeToString(raw[:])
+}
+
+// portalSessionDigest is SHA-256 of the issuing portal session's id,
+// stored on the ticket and copied onto the lease at redemption — the
+// session id itself never reaches the database (same convention as the
+// gateway session_digest). The id scopes streamOwnerTab reads: only the
+// portal session that minted the lease may see the stream's owner tab —
+// never a second session of the same user (R-V3c).
+func portalSessionDigest(portalSessionID string) []byte {
+	sum := sha256.Sum256([]byte(portalSessionID))
+	return sum[:]
+}
+
+// IssueTicket mints a 60 s, single-use opaque ticket for workspaceUID bound to
+// (workspaceUID, runtimeGeneration, runtimeUID, gateway audience) of the
+// current incarnation. Fails with ErrNotFound when the workspace is unknown,
+// in another tenant or owned by someone else, with ErrDenied when the
+// principal's generation was revoked, ErrNotReady when the workspace is not
+// Ready, ErrFreshness when observed state is stale, and ErrConnectionInUse
+// when a live lease exists and takeover is false. With takeover the ticket
+// may supersede the live lease at redemption, fencing the old socket before
+// the new session works.
+// policy is the session data-transfer vector resolved by the API at
+// issue — the meet of the workspace template's policy and the tenant
+// ceiling (ADR 0009 §2). Its Clipboard field is recorded on the ticket
+// row's clipboard_policy column so the gateway's post-redemption redirect
+// re-asserts the client's clipboard flags (V3.24), and the whole vector
+// is recorded verbatim as JSON on session_policy — the audit record of
+// which policy applied. A zero-value policy records NULLs — a ticket
+// with no policy appends nothing.
+// Every ticket is bound to a portal session: an empty portalSessionID is
+// refused with an UNAUTHENTICATED *api.Error before any lookup.
+func (b *Broker) IssueTicket(ctx context.Context, p api.Principal, workspaceUID PlatformID, takeover bool, policy provisioning.SessionPolicy, portalSessionID string) (Ticket, error) {
+	if portalSessionID == "" {
+		return Ticket{}, api.NewError(api.CodeUnauthenticated, "portal session required")
+	}
+	now := b.now()
+
+	// Ownership check against the authoritative workspace row: cross-tenant
+	// and deleted workspaces are indistinguishable from unknown ones.
+	var tenantID, owner, state string
+	err := b.db.Pool().QueryRow(ctx,
+		`SELECT tenant_id, owner_subject, state FROM workspaces WHERE id = $1`,
+		workspaceUID).Scan(&tenantID, &owner, &state)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return Ticket{}, ErrNotFound
+	case err != nil:
+		return Ticket{}, fmt.Errorf("broker: workspace lookup: %w", err)
+	}
+	if state != "active" || tenantID != p.TenantID {
+		return Ticket{}, ErrNotFound
+	}
+	// Another user's workspace in the same tenant is indistinguishable
+	// from a missing one (TM-04): 404, never a 403 existence oracle.
+	if owner != p.Owner() {
+		return Ticket{}, ErrNotFound
+	}
+
+	binding, err := b.currentBinding(ctx, workspaceUID, now)
+	if err != nil {
+		return Ticket{}, err
+	}
+	if binding.Phase != PhaseReady {
+		return Ticket{}, ErrNotReady
+	}
+	if binding.TenantID != "" && binding.TenantID != tenantID {
+		return Ticket{}, ErrDenied
+	}
+
+	// Operator revocation (design §5 teardown): a workspace_revocation row
+	// covering this generation blocks new tickets — connects stay blocked
+	// while teardown proceeds, but a newer runtime generation reconnects.
+	revoked, err := b.revokedGeneration(ctx, workspaceUID, binding.RuntimeGeneration)
+	if err != nil {
+		return Ticket{}, err
+	}
+	if revoked {
+		return Ticket{}, ErrDenied
+	}
+
+	// Advisory live-lease gate: a live lease blocks issue unless the caller
+	// asked for takeover. The atomic claim happens at redeem; this check is
+	// what maps to 409 CONNECTION_IN_USE for the public API.
+	var live string
+	err = b.db.Pool().QueryRow(ctx,
+		`SELECT id FROM connection_lease
+		 WHERE workspace_id = $1 AND state = 'active' AND expires_at > $2`,
+		workspaceUID, now).Scan(&live)
+	switch {
+	case err == nil:
+		if !takeover {
+			return Ticket{}, ErrConnectionInUse
+		}
+	case errors.Is(err, pgx.ErrNoRows):
+	default:
+		return Ticket{}, fmt.Errorf("broker: lease check: %w", err)
+	}
+
+	token, err := randToken()
+	if err != nil {
+		return Ticket{}, fmt.Errorf("broker: mint ticket: %w", err)
+	}
+	expires := now.Add(b.ticketTTL)
+	// A resolved policy records both columns: clipboard_policy feeds the
+	// gateway redirect's client flags, session_policy is the whole vector
+	// verbatim — the audit record of which policy applied (ADR 0009 §2).
+	var clipboard, resolved *string
+	if policy.Clipboard != "" {
+		clipboard = &policy.Clipboard
+		if raw, err := json.Marshal(policy); err == nil {
+			s := string(raw)
+			resolved = &s
+		}
+	}
+	// In a transaction so the connection route's audit TxHook commits the
+	// audit row with the ticket (ADR 0010).
+	if err := b.db.WithTx(ctx, func(tx store.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO launch_ticket
+				(ticket_hash, workspace_id, tenant_id, principal_subject,
+				 runtime_generation, runtime_uid, audience, takeover,
+				 request_id, expires_at, clipboard_policy, session_policy,
+				 portal_session_digest)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+			ticketHash(token), workspaceUID, tenantID, owner,
+			int64(binding.RuntimeGeneration), binding.RuntimeUID,
+			b.audience, takeover, requestID(ctx), expires, clipboard,
+			resolved, portalSessionDigest(portalSessionID))
+		return err
+	}); err != nil {
+		return Ticket{}, fmt.Errorf("broker: insert ticket: %w", err)
+	}
+	return Ticket{WorkspaceID: workspaceUID, Token: token, ExpiresAt: expires}, nil
+}
+
+// RedeemTicket consumes the ticket on every attempt that passes the
+// audience check — an expired, revoked or refused attempt included, because
+// a refusal after the consume commits it — and claims the workspace's
+// single active lease in the same transaction, bound to the incarnation
+// recorded at issuance. A ticket never redeems twice, and a revoked ticket
+// never redeems. On success it returns the new Lease.
+//
+// Lock order matches the session revokes — ticket row first, then the
+// lease row. Both are single-row locks taken by primary key, so the path
+// is deterministic by construction and never crosses waits with the
+// ascending-order sweeps.
+func (b *Broker) RedeemTicket(ctx context.Context, gw GatewayIdentity, opaque string) (Lease, error) {
+	now := b.now()
+	hash := ticketHash(opaque)
+	var lease Lease
+	// refusal is a redemption refused AFTER the consume UPDATE: the closure
+	// returns nil so the consume commits, and the refusal is returned once
+	// the transaction is done (the ClaimTransfer pattern). Every attempt
+	// that passes the audience check therefore spends the ticket.
+	var refusal error
+	err := b.db.WithTx(ctx, func(tx store.Tx) error {
+		var (
+			wsUID, tenantID, subject, runtimeUID, audience string
+			gen                                            uint64
+			takeover                                       bool
+			expiresAt                                      time.Time
+			consumedAt, revokedAt                          *time.Time
+			policy                                         *string
+			portalSession                                  []byte
+		)
+		err := tx.QueryRow(ctx,
+			`SELECT workspace_id, tenant_id, principal_subject, runtime_generation,
+				runtime_uid, audience, takeover, expires_at, consumed_at, revoked_at,
+				clipboard_policy, portal_session_digest
+			 FROM launch_ticket WHERE ticket_hash = $1 FOR UPDATE`, hash).
+			Scan(&wsUID, &tenantID, &subject, &gen, &runtimeUID, &audience,
+				&takeover, &expiresAt, &consumedAt, &revokedAt, &policy, &portalSession)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			return ErrTicketInvalid
+		case err != nil:
+			return fmt.Errorf("broker: ticket lookup: %w", err)
+		}
+		switch {
+		case revokedAt != nil:
+			return ErrRevoked
+		case consumedAt != nil:
+			return ErrTicketInvalid
+		case audience != gw.Audience:
+			// Validation failure: the attempt does not consume the ticket —
+			// the correctly-audienced gateway may still redeem it.
+			return ErrDenied
+		}
+		// Consume on first redemption attempt, even when already expired.
+		if _, err := tx.Exec(ctx,
+			`UPDATE launch_ticket SET consumed_at = $2 WHERE ticket_hash = $1`,
+			hash, now); err != nil {
+			return fmt.Errorf("broker: consume ticket: %w", err)
+		}
+		if !now.Before(expiresAt) {
+			refusal = ErrTicketExpired
+			return nil
+		}
+
+		// A revocation covering the ticket's generation blocks redemption:
+		// the ticket is consumed (single-use still holds) but no lease
+		// issues for a generation under teardown.
+		var revoked bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM workspace_revocation
+				WHERE workspace_id = $1 AND runtime_generation >= $2)`,
+			wsUID, int64(gen)).Scan(&revoked); err != nil {
+			return fmt.Errorf("broker: revocation check: %w", err)
+		}
+		if revoked {
+			refusal = ErrRevoked
+			return nil
+		}
+
+		// A ticket minted under a portal session that no longer exists must
+		// not redeem (TM-07): sign-out deletes the session row before the
+		// revocation transaction, and a live session's tickets are revoked
+		// with it — this read is the second barrier, so an outstanding
+		// ticket dies with its session however the revoke itself fared.
+		// Epoch + absolute expiry + idle window mirror SessionStore's
+		// liveness rule (idle needs WithSessionIdle, FIX-IDLE/SR-1-F2); a
+		// restored dump or a rotated epoch fails closed.
+		var alive bool
+		livePred, liveArgs := b.portalSessionLiveSQL(2)
+		args := append([]any{portalSession}, liveArgs...)
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS (
+				SELECT 1 FROM sessions s
+				WHERE s.id = encode($1, 'hex')
+				  AND `+livePred+`)`,
+			args...).Scan(&alive); err != nil {
+			return fmt.Errorf("broker: portal session check: %w", err)
+		}
+		if !alive {
+			refusal = ErrRevoked
+			return nil
+		}
+
+		// Claim the single active lease for this workspace. The FOR UPDATE
+		// read plus the partial unique index serialize concurrent claims;
+		// a takeover fences the old lease BEFORE the new lease exists.
+		var liveID string
+		var liveExp time.Time
+		var liveGen uint64
+		err = tx.QueryRow(ctx,
+			`SELECT id, expires_at, runtime_generation FROM connection_lease
+			 WHERE workspace_id = $1 AND state = 'active' FOR UPDATE`, wsUID).
+			Scan(&liveID, &liveExp, &liveGen)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			// no live lease
+		case err != nil:
+			return fmt.Errorf("broker: lease lookup: %w", err)
+		default:
+			next := `UPDATE connection_lease SET state = 'expired', closed_at = $2 WHERE id = $1`
+			switch {
+			case !liveExp.After(now):
+			case takeover:
+				next = `UPDATE connection_lease SET state = 'superseded', closed_at = $2 WHERE id = $1`
+			default:
+				refusal = ErrConnectionInUse
+				return nil
+			}
+			if _, err := tx.Exec(ctx, next, liveID, now); err != nil {
+				return fmt.Errorf("broker: fence old lease: %w", err)
+			}
+			// The fenced lease is dead: its streams can no longer report
+			// their close, so the transition owns the bound generation's
+			// drain accounting — the same update liveLease's lazy expiry
+			// and RevokeLease run.
+			if err := closeStreamsTx(ctx, tx, wsUID, liveGen, now); err != nil {
+				return fmt.Errorf("broker: close fenced streams: %w", err)
+			}
+		}
+
+		var fencing uint64
+		if err := tx.QueryRow(ctx,
+			`SELECT COALESCE(MAX(fencing_version), 0) + 1
+			 FROM connection_lease WHERE workspace_id = $1`, wsUID).Scan(&fencing); err != nil {
+			return fmt.Errorf("broker: fencing version: %w", err)
+		}
+		id, err := randID("lease-")
+		if err != nil {
+			return err
+		}
+		lease = Lease{
+			ID:                id,
+			WorkspaceUID:      wsUID,
+			TenantID:          tenantID,
+			PrincipalSubject:  subject,
+			RuntimeGeneration: gen,
+			RuntimeUID:        runtimeUID,
+			FencingVersion:    fencing,
+			GatewayID:         gw.ID,
+			ExpiresAt:         now.Add(b.leaseTTL),
+		}
+		if policy != nil {
+			lease.ClipboardPolicy = *policy
+		}
+		tag, err := tx.Exec(ctx,
+			`INSERT INTO connection_lease
+				(id, workspace_id, tenant_id, principal_subject,
+				 runtime_generation, runtime_uid, fencing_version, gateway_id,
+				 state, created_at, expires_at, last_renewed_at,
+				 portal_session_digest)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', $9, $10, $9, $11)
+			 ON CONFLICT DO NOTHING`,
+			lease.ID, wsUID, tenantID, subject, int64(gen), runtimeUID,
+			int64(fencing), gw.ID, now, lease.ExpiresAt, portalSession)
+		if err != nil {
+			return fmt.Errorf("broker: insert lease: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			// A concurrent redemption holds the workspace's single active
+			// lease (partial unique index). DO NOTHING keeps the
+			// transaction alive, so the consume still commits.
+			refusal = ErrConnectionInUse
+			return nil
+		}
+		return nil
+	})
+	if err != nil {
+		return Lease{}, err
+	}
+	if refusal != nil {
+		return Lease{}, refusal
+	}
+	return lease, nil
+}
+
+// RevokeTicket permanently denies a ticket that has not been consumed; a
+// revoked ticket can never redeem. Revoking a ticket that did not produce the
+// current lease must not affect the live session.
+func (b *Broker) RevokeTicket(ctx context.Context, opaque string) error {
+	_, err := b.db.Pool().Exec(ctx,
+		`UPDATE launch_ticket SET revoked_at = $2
+		 WHERE ticket_hash = $1 AND consumed_at IS NULL`,
+		ticketHash(opaque), b.now())
+	if err != nil {
+		return fmt.Errorf("broker: revoke ticket: %w", err)
+	}
+	return nil
+}

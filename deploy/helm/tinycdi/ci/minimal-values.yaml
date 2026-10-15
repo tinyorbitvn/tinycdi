@@ -1,0 +1,35 @@
+# Smallest install: required values only. No ingress, no seeded
+# templates, no cert-manager — exercises the ghcr.io/tinyorbitvn/*
+# defaults with tag = chart appVersion.
+managedNamespaces:
+  - name: tinycdi-tenant-a
+    tenant: tenant-a
+  - name: tinycdi-tenant-b
+    tenant: tenant-b
+
+portalHost: portal.lab.example.net
+sessionDomain: session.lab.example.net
+
+oidc:
+  issuer: https://idp.lab.example.net/realms/tinycdi
+  clientID: tinycdi
+  existingSecret: tinycdi-oidc-client
+
+database:
+  existingSecret: tinycdi-backend-db
+  allowedPeers:
+    - ipBlock: {cidr: 10.20.30.40/32}
+
+# OIDC login-state sealing keys (required): a pre-created Secret with a
+# 32-byte "current" key (and "previous" during rotation).
+backend:
+  loginKeys:
+    existingSecret: tinycdi-backend-login-keys
+
+# ci/dev clusters (kind) carry no dedicated workspace pool — opt out of
+# the default dedicated placement. Production values should keep
+# runtime.placement.allowSharedNodes: false and prepare the pool per
+# docs/runbooks/install.md "Workspace node pool".
+runtime:
+  placement:
+    allowSharedNodes: true

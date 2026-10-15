@@ -1,0 +1,14 @@
+{
+  "policies": {
+    "DisableAppUpdate": true,
+    "DontCheckDefaultBrowser": true,
+    "OverrideFirstRunPage": "",
+    "OverridePostUpdatePage": "",
+    "DisableTelemetry": true,
+    "FirefoxHome": {
+      "Pocket": false,
+      "SponsoredPocket": false,
+      "SponsoredTopSites": false
+    }
+  }
+}

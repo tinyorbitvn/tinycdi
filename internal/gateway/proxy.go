@@ -1,0 +1,1397 @@
+// Package gateway terminates browser desktop traffic on the session origin:
+// ticket redemption (launch), session-cookie authn/z, lease enforcement and
+// the authenticated HTTP/WebSocket reverse proxy to the runtime (design
+// design §6).
+package gateway
+
+import (
+	"bufio"
+	"context"
+	"crypto/subtle"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httputil"
+	"net/netip"
+	"net/url"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/tinyorbitvn/tinycdi/internal/broker"
+	"github.com/tinyorbitvn/tinycdi/internal/observability"
+	"github.com/tinyorbitvn/tinycdi/internal/ratelimit"
+	"github.com/tinyorbitvn/tinycdi/internal/sessionhost"
+)
+
+// BrokerClient is the session-broker surface the gateway needs. Production
+// wires internal/gateway/brokerclient.Client (mTLS to the broker's internal
+// listener); tests inject a fake.
+type BrokerClient interface {
+	RedeemTicket(ctx context.Context, gw broker.GatewayIdentity, opaque string) (broker.Lease, error)
+	RenewLease(ctx context.Context, gw broker.GatewayIdentity, leaseID string, fence broker.Fence) (broker.Lease, error)
+	ResolveTarget(ctx context.Context, gw broker.GatewayIdentity, leaseID string) (broker.Target, error)
+	RevokeLease(ctx context.Context, leaseID string) error
+	// RevokeLeaseChanged is RevokeLease that also reports whether a live
+	// lease was actually revoked (false: unknown or already dead).
+	RevokeLeaseChanged(ctx context.Context, leaseID string) (bool, error)
+	// ReportActivity posts one session signal (input/connected/disconnect)
+	// for the lease's bound incarnation; the broker stamps receipt time.
+	ReportActivity(ctx context.Context, gw broker.GatewayIdentity, leaseID string, fence broker.Fence, ev broker.ActivityEvent) error
+	// ClaimTransfer spends a minted transfer grant for the lease (method GET
+	// for a download, PUT for an upload); CompleteTransfer closes it with the
+	// bytes moved.
+	ClaimTransfer(ctx context.Context, gw broker.GatewayIdentity, leaseID, transferID, method string) (broker.TransferGrant, error)
+	CompleteTransfer(ctx context.Context, gw broker.GatewayIdentity, leaseID, transferID string, bytesDone int64, ok bool) error
+}
+
+// Contract constants from design §6.
+const (
+	// LeaseRenewInterval — the gateway renews/checks every lease this often.
+	LeaseRenewInterval = 10 * time.Second
+	// RevokeDeadline — after a revoke or a lost-broker failure the session
+	// must be dead within this budget (fail closed).
+	RevokeDeadline = 30 * time.Second
+	// SessionCookieName — host-only Secure/HttpOnly/SameSite session cookie,
+	// set only after a successful ticket redemption.
+	SessionCookieName = "__Host-tcdi_session"
+	// UpstreamHeaderTimeout is the default ResponseHeaderTimeout on the
+	// per-session upstream transport: the runtime must deliver response
+	// headers — including the websocket 101 — inside this window.
+	UpstreamHeaderTimeout = 30 * time.Second
+	// UnattachedSessionTTL is how long a session that never admitted a
+	// request may hold its lease: a client that abandons the launch
+	// between ticket redemption and the 303 delivery leaves a session no
+	// browser holds renewing the lease — and pinning the workspace —
+	// indefinitely. The renew loop reaps it at this TTL. 90 s gives a
+	// slow client ample room to land the first post-303 request.
+	UnattachedSessionTTL = 90 * time.Second
+	// SessionLookupRate / SessionLookupBurst are the default per-client
+	// bounds (requests/minute, burst) on session-directory lookups for
+	// cookies this replica has never seen — each miss costs the store
+	// 1-2 indexed reads. Per replica: the limiter's whole point is
+	// keeping a cookie spray off Postgres, so there is no shared window.
+	// The burst covers a rollout reconnect storm: every VALID cookie a
+	// replica has not cached draws one token, so a mid-size site behind
+	// one client address must fit inside it.
+	SessionLookupRate  = 300
+	SessionLookupBurst = 120
+	// sessionLookupMaxKeys bounds the limiter's key space (LRU).
+	sessionLookupMaxKeys = 100_000
+)
+
+// CookieMode selects the session cookie's cross-site behavior. The portal
+// embeds the session origin in an iframe, so the cookie must reach the
+// session origin from inside that frame.
+type CookieMode string
+
+const (
+	// CookieModeLax (default) issues SameSite=Lax. Browsers send it from the
+	// portal's iframe only when portal and session origins share a
+	// registrable domain (same site, e.g. workspace.example.com and
+	// workspace-session.example.com). Cross-site portals still work via
+	// "open in new tab" (a top-level navigation), not in-portal.
+	CookieModeLax CookieMode = "lax"
+	// CookieModePartitioned issues SameSite=None; Secure; Partitioned
+	// (CHIPS) for deployments where portal and session are different
+	// sites: the cookie is keyed to the embedding portal's site, so it is
+	// usable inside that portal's iframe and nowhere else.
+	CookieModePartitioned CookieMode = "partitioned"
+)
+
+// ParseCookieMode validates a -session-cookie-mode value; "" means lax.
+func ParseCookieMode(v string) (CookieMode, error) {
+	switch m := CookieMode(strings.ToLower(strings.TrimSpace(v))); m {
+	case "", CookieModeLax:
+		return CookieModeLax, nil
+	case CookieModePartitioned:
+		return m, nil
+	}
+	return "", fmt.Errorf("gateway: unknown session cookie mode %q (want lax or partitioned)", v)
+}
+
+// Config wires a Gateway.
+type Config struct {
+	// Identity this gateway presents to the broker.
+	Identity broker.GatewayIdentity
+	// SessionDomain replaces PublicOrigin (design §3.2, D9). Launch and the
+	// desktop proxy are served only on <label>.<SessionDomain>, where the
+	// label names the workspace the request is for.
+	SessionDomain sessionhost.Domain
+	// PortalOrigins is the allowlist of portal origins permitted to POST
+	// /v1/launch (ADR 0004): portal and session live on different
+	// registrable domains, so a real launch arrives cross-site with
+	// Origin=<portal origin>. Entries must be serialized origins
+	// (scheme://host[:port], no path); matching is exact on
+	// scheme+host+port with default ports normalized. The allowlist does
+	// not relax any other route — WebSocket upgrades and the desktop
+	// proxy still require Origin == the request's own workspace origin.
+	PortalOrigins []string
+	// ControlHosts is the Host allowlist for /healthz and /v1/control/*
+	// (in-cluster Service names). It replaces AllowedHosts; the launch and
+	// proxy surface takes its hosts from SessionDomain instead.
+	ControlHosts []string
+	// CookieMode selects the session cookie attributes (default lax).
+	CookieMode CookieMode
+	// Broker is required.
+	Broker BrokerClient
+	// Sessions is the optional session directory (design §3.6, P6): when
+	// set, launch binds the cookie digest to the lease, a cookie this
+	// replica never saw rehydrates its session from the store, and stream
+	// admission claims the lease's stream epoch so a newer claim on any
+	// replica fences this process's stream. Nil keeps single-process
+	// session semantics.
+	Sessions SessionDirectory
+	// UpstreamCA is the fallback trust root for runtime upstream TLS when a
+	// resolved Target carries no TLSCA; verification is never skipped.
+	UpstreamCA *x509.CertPool
+	// ControlToken authenticates the operator/control endpoints. When it is
+	// empty the control surface is disabled entirely (never fail open on
+	// the public listener); when set, an absent bearer must be denied
+	// (SEC-2).
+	ControlToken string
+	// RenewInterval / RevokeDeadline are injectable for tests.
+	RenewInterval  time.Duration
+	RevokeDeadline time.Duration
+	// InputReportInterval is the minimum spacing between "input" activity
+	// reports per session (default InputReportInterval); injectable.
+	InputReportInterval time.Duration
+	// LaunchLimiter throttles /v1/launch attempts per client key (E7);
+	// nil disables. The key is a digest of the session cookie when the
+	// request carries a live session (FX-R30), else it derives like
+	// ratelimit.ClientKey: the socket peer, or the right-most untrusted
+	// X-Forwarded-For entry when the peer sits inside TrustedProxies.
+	// The backend supplies a Postgres-window SharedLimiter in merged mode
+	// and a per-replica Limiter in split mode (ADR 0006 G2).
+	LaunchLimiter ratelimit.Allower
+	// TrustedProxies lists the CIDRs of reverse proxies in front of the
+	// session listener whose X-Forwarded-For claims are trusted (TM-32):
+	// it feeds both the launch limiter's client key and the forwarded
+	// headers the runtime sees — client-supplied values are stripped and
+	// rebuilt from the verified chain only.
+	TrustedProxies []netip.Prefix
+	// UpstreamResponseHeaderTimeout bounds the wait for the runtime's
+	// response headers on the per-session upstream transport (default
+	// UpstreamHeaderTimeout); injectable for tests. It covers the
+	// websocket handshake too — the 101 IS the response headers — so a
+	// hostile runtime that accepts TLS and then stalls can pin neither a
+	// request goroutine nor the session's single upgrade admission. The
+	// established stream is unaffected: once the 101 is read the
+	// transport yields the conn to the hijacked stream and applies no
+	// deadline to it.
+	UpstreamResponseHeaderTimeout time.Duration
+	// UpstreamDialBudget is the total retry budget for refused upstream
+	// connects (default UpstreamDialBudget); injectable for tests.
+	UpstreamDialBudget time.Duration
+	// SessionLookupLimiter bounds session-directory lookups for cookies
+	// this replica has never seen — the only proxy-path request that
+	// spends Postgres reads before auth. It is keyed by the plain client
+	// key (ratelimit.ClientKey over TrustedProxies: socket peer or
+	// right-most untrusted XFF entry, IPv6 folded to /64), applies ONLY
+	// to the unknown-cookie path — requests without a cookie, cookies a
+	// live local session already owns and rehydrated sessions are never
+	// limited — and answers 429 + Retry-After. Nil installs the
+	// SessionLookupRate/SessionLookupBurst bound on the configured clock;
+	// an Allower that always allows disables the limit.
+	SessionLookupLimiter ratelimit.Allower
+	// UpstreamStreamCap bounds the upstream connections one workspace may
+	// hold open through THIS replica at once — websocket streams and
+	// plain proxied requests alike (V11): each admitted request spends
+	// real upstream fds, and the KasmVNC runtime crashes once its fd
+	// count crosses FD_SETSIZE. Over cap a request is refused 429 +
+	// Retry-After before it can consume an upstream slot; N replicas
+	// admit at most N x cap. <= 0 installs DefaultUpstreamStreamCap —
+	// the bound cannot be disabled through Config (a runtime that does
+	// not need it tolerates any large value).
+	UpstreamStreamCap int
+	// UnattachedSessionTTL bounds sessions that never admitted a request
+	// (default UnattachedSessionTTL); injectable for tests. On expiry the
+	// renew loop revokes the lease — releasing the workspace pin a live
+	// lease holds — and tears the session down.
+	UnattachedSessionTTL time.Duration
+	// Now injects a clock for tests.
+	Now func() time.Time
+	// Metrics, Audit and Logger are optional observability sinks; all three
+	// are nil-safe.
+	Metrics *observability.Metrics
+	Audit   observability.AuditSink
+	Logger  *slog.Logger
+}
+
+// Gateway is the session-domain HTTP handler: launch, cookie-gated desktop
+// proxy on per-workspace hosts, and bearer-gated control endpoints on the
+// in-cluster control hosts — one mux, two disjoint host classes.
+type Gateway struct {
+	cfg           Config
+	portalOrigins []*url.URL
+	controlHosts  map[string]bool
+	embedders     []string // serialized portal origins for frame-ancestors
+	proxy         *httputil.ReverseProxy
+	permissions   string // Permissions-Policy pinned on every response
+	// controlFailures counts failed /v1/control/* bearer checks per client
+	// key (R1-26): once a client spends its budget, every control request
+	// from it answers 429 — the right token included — until it refills.
+	controlFailures *ratelimit.Limiter
+
+	mu          sync.Mutex
+	sessions    map[string]*session                     // cookie value -> session
+	byLease     map[string]*session                     // lease ID -> session
+	byWorkspace map[string]*session                     // workspace UID -> session (takeover fence)
+	inflight    map[broker.SessionDigest]*rehydrateCall // digest -> shared lookup
+	// inflightWaiters counts requests parked on a shared lookup's done
+	// channel — test instrumentation that makes the dedup rendezvous
+	// observable (read through export_test.go).
+	inflightWaiters int
+	// upstreamSlots counts in-flight upstream-bound requests per
+	// workspace UID — the runtime pod they all land on — bounded per
+	// workspace by cfg.UpstreamStreamCap (V11). upstreamInFlight is the
+	// replica-wide sum the unlabelled gauge reports.
+	streamMu         sync.Mutex
+	upstreamSlots    map[string]int
+	upstreamInFlight int
+	draining         bool          // set by Drain: refuse new upgrades
+	done             chan struct{} // closed by Close
+	closeOnce        sync.Once
+
+	// connLogLast rate-limits the pre-auth dropped-Connection-token debug
+	// log to one line per minute per route — the metric counts every drop.
+	connLogMu   sync.Mutex
+	connLogLast map[string]time.Time
+}
+
+func (g *Gateway) now() time.Time { return g.cfg.Now() }
+
+// New builds the session gateway handler.
+func New(cfg Config) (*Gateway, error) {
+	if cfg.Broker == nil || cfg.SessionDomain.String() == "" {
+		return nil, errors.New("gateway: Config requires Broker and SessionDomain")
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
+	if cfg.RenewInterval <= 0 {
+		cfg.RenewInterval = LeaseRenewInterval
+	}
+	if cfg.RevokeDeadline <= 0 {
+		cfg.RevokeDeadline = RevokeDeadline
+	}
+	if cfg.InputReportInterval <= 0 {
+		cfg.InputReportInterval = InputReportInterval
+	}
+	if cfg.UpstreamResponseHeaderTimeout <= 0 {
+		cfg.UpstreamResponseHeaderTimeout = UpstreamHeaderTimeout
+	}
+	if cfg.UpstreamDialBudget <= 0 {
+		cfg.UpstreamDialBudget = UpstreamDialBudget
+	}
+	if cfg.UnattachedSessionTTL <= 0 {
+		cfg.UnattachedSessionTTL = UnattachedSessionTTL
+	}
+	if cfg.UpstreamStreamCap <= 0 {
+		// Like the store-protection lookup bound, an omitted cap fails
+		// safe to the default — a zero Config must not silently unbound
+		// the runtime fd count it exists to defend.
+		cfg.UpstreamStreamCap = DefaultUpstreamStreamCap
+	}
+	if cfg.SessionLookupLimiter == nil {
+		// The store-protection bound defaults ON: a nil injection means
+		// the caller never thought about it, which must fail safe, not
+		// unbounded. cfg.Now feeds the bucket clock so tests can drive
+		// refills through the gateway clock.
+		cfg.SessionLookupLimiter = ratelimit.New(SessionLookupRate, SessionLookupBurst, sessionLookupMaxKeys, cfg.Now)
+	}
+	mode, err := ParseCookieMode(string(cfg.CookieMode))
+	if err != nil {
+		return nil, err
+	}
+	cfg.CookieMode = mode
+	g := &Gateway{
+		cfg:           cfg,
+		controlHosts:  map[string]bool{},
+		sessions:      map[string]*session{},
+		byLease:       map[string]*session{},
+		byWorkspace:   map[string]*session{},
+		inflight:      map[broker.SessionDigest]*rehydrateCall{},
+		upstreamSlots: map[string]int{},
+		connLogLast:   map[string]time.Time{},
+		done:          make(chan struct{}),
+	}
+	g.controlFailures = ratelimit.New(ControlFailureRate, ControlFailureBurst, controlFailureMaxKeys, cfg.Now)
+	for _, po := range cfg.PortalOrigins {
+		u, ok := parseOrigin(strings.TrimSpace(po))
+		if !ok {
+			return nil, fmt.Errorf("gateway: PortalOrigins entry %q must be a scheme://host[:port] origin", po)
+		}
+		ser, ok := serializeOrigin(u)
+		if !ok {
+			return nil, fmt.Errorf("gateway: PortalOrigins entry %q is not a plain origin", po)
+		}
+		g.portalOrigins = append(g.portalOrigins, u)
+		g.embedders = append(g.embedders, ser)
+	}
+	g.permissions = sessionPermissionsPolicy(g.embedders)
+	for _, h := range cfg.ControlHosts {
+		g.controlHosts[h] = true
+	}
+	g.proxy = &httputil.ReverseProxy{
+		Rewrite:        g.rewrite,
+		Transport:      sessionRoundTripper{},
+		ModifyResponse: g.responsePolicy,
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			if g.cfg.Logger != nil {
+				g.cfg.Logger.Info("upstream error", "path", r.URL.Path, "err", err)
+			}
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "upstream_unreachable"})
+		},
+	}
+	return g, nil
+}
+
+// Close stops renew loops and kills every live session.
+func (g *Gateway) Close() {
+	g.closeOnce.Do(func() {
+		close(g.done)
+		g.mu.Lock()
+		all := make([]*session, 0, len(g.sessions))
+		for _, s := range g.sessions {
+			all = append(all, s)
+		}
+		g.sessions = map[string]*session{}
+		g.byLease = map[string]*session{}
+		g.byWorkspace = map[string]*session{}
+		g.mu.Unlock()
+		if g.cfg.Metrics != nil {
+			g.cfg.Metrics.AddSessionsActive(-float64(len(all)))
+		}
+		for _, s := range all {
+			s.kill()
+		}
+	})
+}
+
+// ServeHTTP routes by host class first: workspace hosts (a label that
+// Domain.Match resolves under the session domain) get launch and the
+// cookie-gated desktop proxy; configured control hosts get /healthz and
+// the bearer-gated /v1/control/* endpoints. Anything else is misdirected.
+func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	wsID, wsOK := g.cfg.SessionDomain.Match(r.Host)
+	controlOK := g.controlHostOK(r)
+
+	// SEC-07/D14: pin the session-origin security policy on every response
+	// (proxied or not). Proxied upstream copies of these headers are
+	// dropped in responsePolicy so a hostile runtime cannot weaken them.
+	// Framing is governed by CSP frame-ancestors (portal origins only) —
+	// never X-Frame-Options, which cannot express an allowlist and would
+	// break the in-portal session view. The CSP names the request's own
+	// host in connect-src; an unmatched Host is attacker-controlled, so
+	// the configured domain stands in for it rather than echoing bytes a
+	// request smuggled into the Host header.
+	cspHost := r.Host
+	if !wsOK && !controlOK {
+		cspHost = g.cfg.SessionDomain.String()
+	}
+	g.pinSessionHeaders(w.Header(), cspHost)
+
+	rec := &statusRecorder{ResponseWriter: w}
+	start := g.now()
+	route := "proxy"
+	switch {
+	case r.URL.Path == "/metrics":
+		// E8: metrics live only on the dedicated metrics listener — the
+		// path must not exist on this public listener for any host class.
+		writeJSON(rec, http.StatusNotFound, map[string]string{"error": "not_found"})
+	case r.URL.Path == LaunchPath:
+		route = "launch"
+		if !wsOK {
+			writeJSON(rec, http.StatusMisdirectedRequest, map[string]string{"error": "bad_host"})
+			break
+		}
+		g.handleLaunch(rec, r, wsID)
+	case strings.HasPrefix(r.URL.Path, "/v1/control/") || r.URL.Path == "/healthz":
+		// The operator surface exists only on the in-cluster control
+		// hosts; on workspace or foreign hosts these paths do not exist.
+		if !controlOK {
+			writeJSON(rec, http.StatusNotFound, map[string]string{"error": "not_found"})
+			break
+		}
+		if r.URL.Path == "/healthz" {
+			route = "healthz"
+			writeJSON(rec, http.StatusOK, map[string]string{"status": "ok"})
+		} else {
+			route = "control"
+			g.serveControl(rec, r)
+		}
+	case strings.HasPrefix(r.URL.Path, TransferPathPrefix):
+		route = "transfer"
+		if !wsOK {
+			writeJSON(rec, http.StatusMisdirectedRequest, map[string]string{"error": "bad_host"})
+			break
+		}
+		g.serveTransfer(rec, r, wsID)
+	default:
+		if !wsOK {
+			writeJSON(rec, http.StatusMisdirectedRequest, map[string]string{"error": "bad_host"})
+			break
+		}
+		g.serveProxy(rec, r, wsID)
+	}
+	if g.cfg.Metrics != nil {
+		g.cfg.Metrics.ObserveHTTP("session", route, r.Method, codeClass(rec.status), g.now().Sub(start))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Control plane (operator surface, SEC-2 bearer-gated)
+// ---------------------------------------------------------------------------
+
+// Control-surface failure budget (R1-26): ControlFailureBurst failed
+// bearer checks per client key, refilled at ControlFailureRate per minute.
+// The bearer is the only gate on the control hosts — the host class is a
+// Host-header routing check, not a network boundary — so guessing must not
+// run at line rate. controlFailureMaxKeys caps the LRU of tracked clients.
+const (
+	ControlFailureRate    = 10
+	ControlFailureBurst   = 10
+	controlFailureMaxKeys = 10_000
+)
+
+// IsControlHost reports whether r's Host names a configured control host —
+// the backend mounts its health endpoints on those hosts only.
+func (g *Gateway) IsControlHost(r *http.Request) bool { return g.controlHostOK(r) }
+
+func (g *Gateway) controlAuth(r *http.Request) bool {
+	if g.cfg.ControlToken == "" {
+		return false // no token configured: control surface closed (SEC-2)
+	}
+	const p = "Bearer "
+	h := r.Header.Get("Authorization")
+	if !strings.HasPrefix(h, p) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(h, p)), []byte(g.cfg.ControlToken)) == 1
+}
+
+// serveControl is reached only on a control host (ServeHTTP gates the
+// path); the bearer check is the remaining gate.
+func (g *Gateway) serveControl(w http.ResponseWriter, r *http.Request) {
+	// The action name mirrors the endpoint so a refused attempt audits
+	// under the operation it tried to reach.
+	action := map[string]string{
+		"/v1/control/session": "session.list",
+		"/v1/control/revoke":  "session.revoke",
+	}[r.URL.Path]
+	client := ratelimit.ClientKey(r, g.cfg.TrustedProxies)
+	if ok, retry := g.controlFailures.Peek(client); !ok {
+		if action != "" {
+			g.audit(r, action, "", observability.OutcomeDenied, "rate_limited")
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(ratelimit.RetryAfterSeconds(retry)))
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
+		return
+	}
+	if !g.controlAuth(r) {
+		g.controlFailures.Allow(client)
+		if action != "" {
+			g.audit(r, action, "", observability.OutcomeDenied, "unauthorized")
+		}
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	switch r.URL.Path {
+	case "/v1/control/session":
+		g.handleControlSession(w, r)
+	case "/v1/control/revoke":
+		g.handleControlRevoke(w, r)
+	default:
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+	}
+}
+
+// handleControlSession lists the sessions held by THIS replica only: the
+// gateway keeps no cross-replica registry (the lease directory lives in the
+// broker), so the answer is replica-local and a caller that needs the whole
+// deployment must ask every replica.
+func (g *Gateway) handleControlSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method"})
+		return
+	}
+	g.mu.Lock()
+	all := make([]*session, 0, len(g.sessions))
+	for _, s := range g.sessions {
+		all = append(all, s)
+	}
+	g.mu.Unlock()
+	type view struct {
+		LeaseID     string `json:"leaseId"`
+		Connections int    `json:"connections"`
+		Transport   string `json:"transport,omitempty"`
+	}
+	var out []view
+	for _, s := range all {
+		if !s.live(g) {
+			continue
+		}
+		v := view{LeaseID: s.leaseID(), Connections: s.streamCount()}
+		if v.Connections > 0 {
+			v.Transport = "websocket"
+		}
+		out = append(out, v)
+	}
+	g.audit(r, "session.list", "", observability.OutcomeSuccess, "")
+	writeJSON(w, http.StatusOK, map[string]any{"active": len(out) > 0, "sessions": out})
+}
+
+// handleControlRevoke revokes the named lease at the broker and kills its
+// session if this replica holds it. SEC-1: an identifier that resolves to
+// no live lease must not affect any other session — there is no implicit
+// "current session" fallback.
+func (g *Gateway) handleControlRevoke(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method"})
+		return
+	}
+	var body struct {
+		LeaseID string `json:"leaseId"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_body"})
+		return
+	}
+	if body.LeaseID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing_lease"})
+		return
+	}
+	// The session may live on another replica, so the broker (the shared
+	// lease directory) is always told; that replica's renew loop then sees
+	// the lease die and closes its streams. A session held here is killed
+	// first so it fails closed without waiting for the broker round trip.
+	g.mu.Lock()
+	s := g.byLease[body.LeaseID]
+	g.mu.Unlock()
+	wsUID := ""
+	if s != nil {
+		wsUID = s.workspaceUID()
+		g.killSession(s, "control_revoke")
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	changed, err := g.cfg.Broker.RevokeLeaseChanged(ctx, body.LeaseID)
+	cancel()
+	if err != nil {
+		// Not accepted: the operator must retry. A local session, if any,
+		// is already dead.
+		g.audit(r, "session.revoke", wsUID, observability.OutcomeFailure, "broker_unavailable")
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "unavailable"})
+		return
+	}
+	if !changed {
+		// An unknown or already-dead lease: nothing was revoked, so neither
+		// the answer nor the audit trail may claim it was.
+		g.audit(r, "session.revoke", wsUID, observability.OutcomeFailure, "lease_not_live")
+		writeJSON(w, http.StatusOK, map[string]bool{"revoked": false})
+		return
+	}
+	g.audit(r, "session.revoke", wsUID, observability.OutcomeSuccess, "")
+	writeJSON(w, http.StatusOK, map[string]bool{"revoked": true})
+}
+
+// ---------------------------------------------------------------------------
+// Desktop proxy
+// ---------------------------------------------------------------------------
+
+type ctxKey int
+
+const ctxKeySession ctxKey = iota
+
+// serveProxy is the desktop catch-all on a workspace host (ServeHTTP
+// already resolved wsID from the request Host): session auth -> host
+// binding -> upgrade admission -> authenticated reverse proxy to the
+// resolved runtime target.
+func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string) {
+	if r.URL.Query().Get(TicketField) != "" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "ticket_in_query"})
+		return
+	}
+	clean, ok := cleanedProxyPath(r.URL)
+	if !ok || !upstreamPathOK(clean) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+		return
+	}
+	// SEC-07: refuse service-worker registration fetches on the shared
+	// session origin — a registered worker would MITM every later request,
+	// including other tenants' sessions on this origin.
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("Service-Worker")), "script") {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "service_worker_forbidden"})
+		return
+	}
+	// A client's Connection token list names headers the stdlib reverse
+	// proxy deletes AFTER the outbound request is built — including the
+	// ones this gateway injects. Injection now lives in Rewrite (after the
+	// strip), and the token list is additionally canonicalised to the only
+	// values a client legitimately sends so it can name nothing else.
+	// Dropped tokens are logged and counted, never 400'd.
+	g.sanitizeConnectionTokens(r)
+	// A malformed or non-websocket upgrade offer (Upgrade header present
+	// but not a complete RFC6455 request) must never be proxied: a foreign
+	// upgrade token would reach upstream bypassing originOK+admitUpgrade,
+	// and a stray Upgrade header must not consume the stream slot (SEC-3).
+	if r.Header.Get("Upgrade") != "" && !isUpgrade(r) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_upgrade"})
+		return
+	}
+	s, lookupErr := g.lookupSession(r, wsID)
+	if lookupErr != nil {
+		// The unknown-cookie limiter refused before any store read: 429
+		// with the bucket's own wait hint, counted like the launch
+		// bucket's refusals. Any other failure is the directory not
+		// answering: not "no session" — 503 so the browser retries;
+		// nothing is cached.
+		var lim *lookupLimitedError
+		if errors.As(lookupErr, &lim) {
+			if g.cfg.Metrics != nil {
+				g.cfg.Metrics.IncRateLimited("session_lookup")
+			}
+			w.Header().Set("Retry-After", strconv.Itoa(ratelimit.RetryAfterSeconds(lim.retryAfter)))
+			g.audit(r, "session.lookup", wsID, observability.OutcomeDenied, "rate_limited")
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
+			return
+		}
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "unavailable"})
+		return
+	}
+	if s != nil && s.workspaceUID() != wsID {
+		// D11: a session bound to a different workspace is "absent" on
+		// this host — the cookie is host-only and can never arrive here
+		// through a browser, so a mismatch means replay or confusion.
+		// Answer as if no session existed and audit; the session itself
+		// stays live on its own host.
+		g.audit(r, "session.host_mismatch", s.workspaceUID(), observability.OutcomeDenied, "host_mismatch")
+		s = nil
+	}
+	if s == nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	// A request that resolves a live session on its own host proves the
+	// 303 landed — mark the session attached so the ghost TTL can never
+	// reap it underneath a real client. This runs BEFORE the upstream
+	// bound: a request refused at the cap still carried a valid cookie
+	// here, so a saturated workspace must not ghost-reap a live client
+	// at the unattached TTL while it retries.
+	s.noteAttached()
+	// Per-workspace upstream bound (V11): an admitted request — upgrade
+	// or plain fetch — holds an upstream connection the KasmVNC runtime
+	// spends real fds on, and the workspace's live count is capped per
+	// replica. Checked BEFORE any upgrade admission so a refusal claims
+	// no stream epoch and fences no live conn.
+	if !g.acquireUpstreamStream(wsID) {
+		g.writeStreamCapRefused(w, r, wsID)
+		return
+	}
+	defer g.releaseUpstreamStream(wsID)
+	// NAVTEL-1: a frame-document load on a session whose lease already had
+	// a stream is a re-navigation (the portal watch's FX-R32 fallback, or
+	// a user reload/new-tab load) — the per-tab id minted per outer page
+	// load cannot see these, so the gateway counts them server-side.
+	// Websockify upgrades and asset fetches never match.
+	if dest, nav := frameNavDest(r, clean); nav && s.hadStream() {
+		// FX-R31 same-tab check: the frame URL embeds the claiming tab's id
+		// in its `path` client setting (path=websockify?tcdi_tab=<id>). A
+		// load carrying an id that differs from the lease's recorded stream
+		// owner is a second tab of the same browser taking the session over
+		// via the shared cookie — a takeover, not a re-navigation — and is
+		// not counted. Only a CONFIRMED different owner excludes: loads
+		// with no usable id and leases with no recorded owner cannot be
+		// told apart from a reload, so they still count. The id itself
+		// never reaches a metric label or log field.
+		if docTab, prev := docOwnerTab(r), s.streamOwner(); docTab != "" && prev != "" && docTab != prev {
+			if g.cfg.Logger != nil {
+				g.cfg.Logger.Debug("session frame tab-takeover load", "dest", dest)
+			}
+		} else {
+			if g.cfg.Metrics != nil {
+				g.cfg.Metrics.IncFrameReload(dest)
+			}
+			if g.cfg.Logger != nil {
+				g.cfg.Logger.Debug("session frame re-navigation", "dest", dest, "lease", s.leaseID())
+			}
+		}
+	}
+	var gen int
+	var streamEpoch uint64 // the epoch this stream claimed; 0 without a directory
+	if isUpgrade(r) {
+		if g.isDraining() {
+			writeDraining(w)
+			return
+		}
+		if !g.originOK(r) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "bad_origin"})
+			return
+		}
+		ownerTab := r.URL.Query().Get(streamOwnerTabParam)
+		if !broker.ValidStreamOwnerTab(ownerTab) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "owner_tab_required"})
+			return
+		}
+		var ok bool
+		if gen, ok = s.admitUpgrade(); !ok {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "stream_in_use"})
+			return
+		}
+		// Release only our own reservation: if this stream was fenced by a
+		// newer upgrade, the defer is a no-op and cannot clear the
+		// successor's admission.
+		defer s.endUpgrade(gen)
+		// With a session directory the lease's stream epoch is the
+		// cross-replica fence: claiming it here makes the previous
+		// replica's renew loop drop its copy of this stream (P3). The
+		// claiming tab's id rides the same write (FX-R31): GET /connection
+		// can then answer WHO holds the stream, not just the epoch count.
+		if g.cfg.Sessions != nil {
+			epoch, err := g.claimStream(r.Context(), s, ownerTab)
+			streamEpoch = epoch
+			if err != nil {
+				if terminalBrokerErr(err) {
+					g.killSession(s, "claim_"+leaseFailureReason(err))
+					writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "session_revoked"})
+					return
+				}
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "unavailable"})
+				return
+			}
+		}
+	}
+	if err := g.ensureTarget(r.Context(), s); err != nil {
+		if terminalBrokerErr(err) {
+			g.killSession(s, "target_"+leaseFailureReason(err))
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "session_revoked"})
+			return
+		}
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "target_unresolvable"})
+		return
+	}
+
+	var captured net.Conn
+	hw := &hijackCapture{
+		ResponseWriter: w,
+		// serveProxy runs only on a matched workspace host, so the CSP
+		// names r.Host exactly as ServeHTTP did.
+		pin: func(h http.Header) { g.pinSessionHeaders(h, r.Host) },
+		// wrapConn intercepts client->upstream bytes so the sniffer can spot
+		// RFB input frames inside the proxied WebSocket stream.
+		wrapConn: func(c net.Conn) net.Conn {
+			return &sniffingConn{Conn: c, done: make(chan struct{}), sniffer: &wsFrameSniffer{
+				onInput: func() { g.noteInput(s) },
+			}}
+		},
+		onHijack: func(c net.Conn) {
+			if s.addConn(c) {
+				captured = c
+				// The stream is admitted and live: report connected so the
+				// broker counts an open stream and cancels any pending
+				// disconnect grace window (design §8).
+				s.enqueueActivity(broker.ActivityConnected, streamEpoch)
+			}
+			// The upstream handshake is done and the conn is registered:
+			// free the admission slot so a later upgrade on this session
+			// fences this conn (reload), while a second upgrade during the
+			// handshake itself still gets 409. endUpgrade also runs via the
+			// defer above for upgrades that never reach hijack.
+			s.endUpgrade(gen)
+		},
+	}
+	ctx, tid, ok := s.track(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "session_revoked"})
+		return
+	}
+	if isUpgrade(r) {
+		s.setStreamTrack(tid)
+	}
+	defer func() {
+		if captured != nil {
+			// The interactive stream closed — start the disconnect grace
+			// window server-side. The FIFO queue keeps this ordered behind
+			// any earlier connected report and ahead of a later reconnect.
+			// Enqueued BEFORE untrack drops the conn so Drain can trust
+			// "no open conns" to mean "disconnect already queued".
+			s.enqueueActivity(broker.ActivityDisconnect, streamEpoch)
+		}
+		s.untrack(tid, captured)
+	}()
+	g.proxy.ServeHTTP(hw, r.WithContext(context.WithValue(ctx, ctxKeySession, s)))
+}
+
+// frameDocPaths are the upstream paths that serve the KasmVNC client's
+// HTML documents — the only allowlisted paths a browser navigation can
+// land on (asset subtrees never render as documents).
+var frameDocPaths = map[string]struct{}{
+	"/": {}, "/index.html": {}, "/vnc.html": {}, "/screen.html": {},
+	"/disconnected.html": {},
+}
+
+// frameNavDest reports whether r is a session-frame document load and, if
+// so, the bounded destination label to count it under. Fetch metadata is
+// authoritative when present: Sec-Fetch-Mode "navigate" marks exactly the
+// browser navigations — iframe (the portal's session frame), document (a
+// top-level load) or other contexts — and positively excludes subresource
+// fetches of document paths. With no metadata (older browsers, non-browser
+// clients) the document-path allowlist stands in: the runtime's HTML pages
+// are never fetched as subresources. Websocket upgrades and non-GET/HEAD
+// methods are never document loads.
+func frameNavDest(r *http.Request, cleanPath string) (string, bool) {
+	if isUpgrade(r) || (r.Method != http.MethodGet && r.Method != http.MethodHead) {
+		return "", false
+	}
+	if fm := r.Header.Get("Sec-Fetch-Mode"); fm != "" {
+		if fm != "navigate" {
+			return "", false
+		}
+		switch dest := r.Header.Get("Sec-Fetch-Dest"); dest {
+		case "iframe", "document":
+			return dest, true
+		default:
+			return "other", true
+		}
+	}
+	if _, ok := frameDocPaths[cleanPath]; ok {
+		return "other", true
+	}
+	return "", false
+}
+
+// docOwnerTab extracts the claiming tab id a document load carries in its
+// `path` client setting: the portal's frame URL (and the gateway's own
+// post-launch DesktopPath) is ".../?...&path=websockify?tcdi_tab=<id>" so
+// the load's upcoming stream claim is pre-armed with it (FX-R31). Returns
+// "" when the param is absent or the embedded id is malformed — an
+// unclassifiable load, never a different-tab proof.
+func docOwnerTab(r *http.Request) string {
+	p := r.URL.Query().Get("path")
+	i := strings.IndexByte(p, '?')
+	if i < 0 {
+		return ""
+	}
+	q, err := url.ParseQuery(p[i+1:])
+	if err != nil {
+		return ""
+	}
+	t := q.Get(streamOwnerTabParam)
+	if !broker.ValidStreamOwnerTab(t) {
+		return ""
+	}
+	return t
+}
+
+// ensureTarget resolves the upstream once per session and builds the
+// pinned-CA transport. ResolveTarget errors classify like renew errors:
+// terminal (revoked/stale/denied) kills the session, transient → 502.
+func (g *Gateway) ensureTarget(ctx context.Context, s *session) error {
+	s.mu.Lock()
+	if s.target != nil {
+		s.mu.Unlock()
+		return nil
+	}
+	s.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	t, err := g.cfg.Broker.ResolveTarget(ctx, g.cfg.Identity, s.leaseID())
+	cancel()
+	if err != nil {
+		return err
+	}
+	up, err := upstreamURL(t)
+	if err != nil {
+		return err
+	}
+	pool := x509.NewCertPool()
+	switch {
+	case len(t.TLSCA) > 0 && pool.AppendCertsFromPEM(t.TLSCA):
+		// per-lease pinned bundle (the runtime's self-signed tls.crt)
+	case g.cfg.UpstreamCA != nil:
+		pool = g.cfg.UpstreamCA
+	default:
+		// empty pool: verify always runs, so every upstream fails closed
+	}
+	// TLSServerName pins the SNI/verify name: the runtime's self-signed cert
+	// carries SANs for PodName/ServiceName/localhost — NOT the .svc FQDN in
+	// the dial address (design-review addendum). Verification is full TLS;
+	// never InsecureSkipVerify.
+	rt := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs:    pool,
+			ServerName: t.TLSServerName,
+			MinVersion: tls.VersionTLS12,
+		},
+		DialContext:           dialWithRetry(g.cfg.UpstreamDialBudget),
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: g.cfg.UpstreamResponseHeaderTimeout,
+		ExpectContinueTimeout: 1 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+	}
+	s.mu.Lock()
+	s.target = &t
+	s.upURL = up
+	s.transport = rt
+	s.mu.Unlock()
+	return nil
+}
+
+// upstreamURL resolves the dial URL for a target: UpstreamURL (the contract
+// field, e.g. https://ws-<uid>.<ns>.svc:8443) wins; ServiceDNS as bare
+// authority is the fallback for older fakes.
+func upstreamURL(t broker.Target) (*url.URL, error) {
+	raw := t.UpstreamURL
+	if raw == "" && t.ServiceDNS != "" {
+		raw = "https://" + t.ServiceDNS
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return nil, fmt.Errorf("gateway: target has no usable https upstream")
+	}
+	return u, nil
+}
+
+// resolved returns the lazily-resolved upstream target, its parsed URL and
+// the pinned-CA transport; nil when resolution has not happened/failed yet.
+func (s *session) resolved() (*broker.Target, *url.URL, http.RoundTripper) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.target, s.upURL, s.transport
+}
+
+// rewrite retargets the request at the resolved upstream and stamps the
+// gateway-owned headers. It runs as the ReverseProxy's Rewrite hook — AFTER
+// the stdlib hop-by-hop strip — so no client Connection token list can ever
+// remove the injected Authorization, the rebuilt forwarding chain or
+// Sec-WebSocket-Origin (the Director ran BEFORE that strip, which is how a
+// client could name and delete them). Authority comes from
+// broker.Target.UpstreamURL (never client-supplied — SSRF guard), runtime
+// credentials are injected server-side, client Authorization/Cookie
+// stripped.
+func (g *Gateway) rewrite(pr *httputil.ProxyRequest) {
+	r := pr.Out
+	s, _ := r.Context().Value(ctxKeySession).(*session)
+	if s == nil {
+		return // Transport will fail; ErrorHandler answers 502
+	}
+	t, up, _ := s.resolved()
+	if t == nil || up == nil {
+		return
+	}
+	r.URL.Scheme = up.Scheme
+	r.URL.Host = up.Host
+	r.Host = up.Host
+	// SEC-20: forward the cleaned path. serveProxy already rejected any path
+	// whose decoded or escaped form carries traversal tricks; clearing
+	// RawPath forces the canonical escaping of the verified Path onto the
+	// wire so the runtime sees exactly what the allowlist authorized.
+	r.URL.RawPath = ""
+	if t.Username != "" || t.Password != "" {
+		r.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString(
+			[]byte(t.Username+":"+t.Password)))
+	} else {
+		r.Header.Del("Authorization")
+	}
+	r.Header.Del("Cookie")
+	g.rewriteForwarded(pr.In, r)
+	// Upstream quirk: KasmVNC requires the legacy Sec-WebSocket-Origin
+	// header on upgrades; browsers only send Origin. We have already
+	// validated Origin (scheme+exact authority) before proxying, so relay
+	// that verified value. On the outbound request the stdlib has already
+	// re-pinned Connection: Upgrade + Upgrade: websocket for real upgrade
+	// offers, so isUpgrade reads the negotiated state, not client claims.
+	if isUpgrade(r) {
+		r.Header.Set("Sec-WebSocket-Origin", r.Header.Get("Origin"))
+	} else {
+		r.Header.Del("Sec-WebSocket-Origin")
+	}
+}
+
+// rewriteForwarded rebuilds the client-address headers toward the runtime
+// (TM-32): every client-supplied entry in clientHeaderStripList is removed
+// from the outbound request and the address headers are re-derived from
+// the INBOUND request's trusted chain only. The runtime keys its
+// brute-force blacklist on the forwarded address, so a spoofed client
+// value must never reach the pod. The derived client is the same
+// selection the launch limiter keys on — ratelimit.ClientAddr shares
+// ClientKey's chain walk — but rendered as the real client address
+// (unmapped, never folded to its /64): the limiter's per-prefix billing
+// granularity must not blur the address attribution the runtime sees.
+// The peer is rendered explicitly — in the Rewrite hook the stdlib does
+// not auto-append RemoteAddr the way the Director path did — so the
+// runtime sees "<client>, <peer>" when a trusted proxy fronts the socket
+// and the bare verified peer otherwise. Forwarded mirrors that chain in
+// RFC 7239 form and X-Real-IP carries the derived client for runtimes
+// that key on it.
+func (g *Gateway) rewriteForwarded(in, out *http.Request) {
+	stripClientHeaders(out.Header)
+	peer := ratelimit.PeerIP(in.RemoteAddr)
+	client := ratelimit.ClientAddr(in, g.cfg.TrustedProxies)
+	if _, err := netip.ParseAddr(client); err != nil {
+		// A non-IP right-most entry (spoofed or "unknown") is not a
+		// usable client address: fall back to the verified peer rather
+		// than forward client bytes into a parsed field.
+		client = peer
+	}
+	xff := client
+	if client != peer {
+		xff += ", " + peer
+	}
+	out.Header.Set("X-Forwarded-For", xff)
+	if client != peer {
+		out.Header.Set("Forwarded", "for="+forwardedFor(client)+", for="+forwardedFor(peer))
+	} else {
+		out.Header.Set("Forwarded", "for="+forwardedFor(peer))
+	}
+	out.Header.Set("X-Real-Ip", client)
+}
+
+// clientHeaderStripList is the one table of client-supplied headers the
+// session proxy never relays: the whole X-Forwarded-*/X-Original-*
+// families plus Forwarded, X-Real-Ip and X-Rewrite-Url (the forwarding
+// family — a forged value could shape absolute redirects, scheme
+// decisions and origin metadata upstream), and the vendor client-address
+// headers an intermediary claim could spoof. Entries are lowercase; a
+// trailing "-" marks a prefix rule. The stdlib's pre-Rewrite pass deletes
+// only Forwarded and three X-Forwarded-* entries — everything else would
+// reach the tenant-controlled runtime verbatim.
+var clientHeaderStripList = []string{
+	"forwarded", "x-real-ip", "x-rewrite-url",
+	"x-forwarded-", "x-original-",
+	"via", "x-client-ip", "true-client-ip", "cf-connecting-ip",
+	"x-cluster-client-ip", "x-envoy-",
+}
+
+// stripClientHeaders deletes every clientHeaderStripList entry from h.
+func stripClientHeaders(h http.Header) {
+	for k := range h {
+		fold := strings.ToLower(k)
+		for _, rule := range clientHeaderStripList {
+			if fold == rule ||
+				(strings.HasSuffix(rule, "-") && strings.HasPrefix(fold, rule)) {
+				delete(h, k)
+				break
+			}
+		}
+	}
+}
+
+// connTokenAllowlist is the full set of Connection tokens a client may
+// keep: upgrade (websocket offers), keep-alive and close. Every other
+// token names a header the stdlib hop-by-hop strip would delete from the
+// outbound request — and no legitimate client needs that power, least of
+// all over headers the gateway injects itself.
+var connTokenAllowlist = map[string]struct{}{
+	"upgrade": {}, "keep-alive": {}, "close": {},
+}
+
+// sanitizeConnectionTokens canonicalises the client's Connection header to
+// connTokenAllowlist, dropping every other token (never a 400 — browsers
+// never send one, and the Rewrite-order fix already makes the tokens
+// unable to reach the injected headers; this is defence-in-depth so the
+// strip can name nothing else at all). Dropped tokens are debug-logged
+// and counted.
+func (g *Gateway) sanitizeConnectionTokens(r *http.Request) {
+	vals, ok := r.Header["Connection"]
+	if !ok {
+		return
+	}
+	var kept, dropped []string
+	for _, v := range vals {
+		for _, tok := range strings.Split(v, ",") {
+			tok = strings.TrimSpace(tok)
+			if tok == "" {
+				continue
+			}
+			if _, ok := connTokenAllowlist[strings.ToLower(tok)]; ok {
+				kept = append(kept, tok)
+			} else {
+				dropped = append(dropped, tok)
+			}
+		}
+	}
+	if len(dropped) == 0 {
+		return
+	}
+	if g.cfg.Metrics != nil {
+		g.cfg.Metrics.AddConnectionTokensDropped(float64(len(dropped)))
+	}
+	// The drop runs before session auth: an unauthenticated client could
+	// otherwise spray the debug log — admit at most one line per minute
+	// per route. The metric still counts every dropped token.
+	if g.cfg.Logger != nil && g.connTokenLogOK("proxy") {
+		g.cfg.Logger.Debug("dropped client Connection tokens",
+			"dropped", strings.Join(dropped, ","), "path", r.URL.Path)
+	}
+	if len(kept) == 0 {
+		delete(r.Header, "Connection")
+	} else {
+		r.Header["Connection"] = []string{strings.Join(kept, ", ")}
+	}
+}
+
+// connTokenLogOK admits one dropped-Connection-token debug log per minute
+// per route: the canonicalisation runs before session auth, so unlike the
+// counter (which counts every drop) the log line needs its own bound
+// against unauthenticated spray.
+func (g *Gateway) connTokenLogOK(route string) bool {
+	g.connLogMu.Lock()
+	defer g.connLogMu.Unlock()
+	if last, ok := g.connLogLast[route]; ok && g.now().Sub(last) < time.Minute {
+		return false
+	}
+	g.connLogLast[route] = g.now()
+	return true
+}
+
+// forwardedFor renders an address as an RFC 7239 for= token; IPv6 literals
+// are quoted in brackets per the grammar.
+func forwardedFor(ip string) string {
+	if strings.Contains(ip, ":") {
+		return `"[` + ip + `]"`
+	}
+	return ip
+}
+
+// sessionRoundTripper forwards through the per-session pinned-CA transport.
+type sessionRoundTripper struct{}
+
+func (sessionRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	s, _ := r.Context().Value(ctxKeySession).(*session)
+	if s == nil {
+		return nil, errors.New("gateway: no session on request")
+	}
+	_, _, rt := s.resolved()
+	if rt == nil {
+		return nil, errors.New("gateway: upstream not resolved")
+	}
+	return rt.RoundTrip(r)
+}
+
+// sessionCSP is the Content-Security-Policy pinned on every gateway
+// response (SEC-07). It is sized to the pinned KasmVNC 1.5.0 web client —
+// verified against the sha256-locked deb:
+//
+//   - script-src 'unsafe-inline': index/vnc/screen.html carry inline
+//     bootstrap <script> blocks and an onclick attribute we cannot rewrite
+//     (the assets are served by the runtime, not us); 'wasm-unsafe-eval'
+//     covers the WebAssembly decoder worker (WebAssembly.instantiate).
+//   - style-src 'unsafe-inline': disconnected.html has an inline <style>
+//     block and the markup uses style= attributes.
+//   - img-src data:: the control bar embeds the Kasm logo as a data: URI.
+//   - connect-src wss://<host>: the /websockify desktop socket. data: is
+//     there for the client's H.264 probe, which fetch()es a data: URI; such a
+//     fetch reaches no network, and refused it logs "Failed to detect
+//     codecs" on every load (FX-R22).
+//   - worker-src 'self': decoder and port-relay workers.
+//   - frame-src blob:: the print feature renders a PDF blob in a hidden
+//     iframe.
+//   - frame-ancestors: only the configured portal origins may embed the
+//     session (the in-portal session view); with no portal origin
+//     configured framing is denied outright ('none').
+//
+// Every other directive stays default-src 'self' or harder; plugins, forms
+// and base-tag rewriting are all denied outright. The policy is per-host:
+// connect-src names wss://<this workspace's host>, never a sibling's.
+func sessionCSP(host string, embedders []string) string {
+	ancestors := "'none'"
+	if len(embedders) > 0 {
+		ancestors = strings.Join(embedders, " ")
+	}
+	return "default-src 'self'" +
+		"; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'" +
+		"; style-src 'self' 'unsafe-inline'" +
+		"; img-src 'self' data:" +
+		"; font-src 'self'" +
+		"; connect-src 'self' wss://" + host + " data:" +
+		"; worker-src 'self'" +
+		"; media-src 'self'" +
+		"; frame-src blob:" +
+		"; frame-ancestors " + ancestors +
+		"; base-uri 'none'" +
+		"; object-src 'none'" +
+		"; form-action 'none'"
+}
+
+// sessionPermissionsPolicy grants clipboard and fullscreen to the session
+// origin itself and to the embedding portal origins only (the portal's
+// iframe must also delegate them via its allow attribute); powerful
+// features the desktop client never uses are disabled outright.
+// keyboard-map is granted to the session origin alone: it exposes only the
+// keyboard layout, to our own session origin, and lets the client map
+// non-US layouts (FX-R22).
+func sessionPermissionsPolicy(embedders []string) string {
+	allow := "self"
+	for _, e := range embedders {
+		allow += ` "` + e + `"`
+	}
+	return "clipboard-read=(" + allow + ")" +
+		", clipboard-write=(" + allow + ")" +
+		", fullscreen=(" + allow + ")" +
+		", keyboard-map=(self)" +
+		", camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+}
+
+// serializeOrigin renders u as a browser-serialized origin for policy
+// headers (CSP frame-ancestors, Permissions-Policy): lowercase
+// scheme://host with default ports dropped. Anything that could break out
+// of a header token is refused.
+func serializeOrigin(u *url.URL) (string, bool) {
+	host := strings.ToLower(u.Hostname())
+	if host == "" || strings.ContainsAny(host, " \t;,'\"()*") {
+		return "", false
+	}
+	if strings.Contains(host, ":") { // IPv6 literal
+		host = "[" + host + "]"
+	}
+	out := u.Scheme + "://" + host
+	if p := u.Port(); p != "" && p != effectivePortDefault(u.Scheme) {
+		out += ":" + p
+	}
+	return out, true
+}
+
+func effectivePortDefault(scheme string) string {
+	return effectivePort(&url.URL{Scheme: scheme})
+}
+
+// pinSessionHeaders sets the session-origin security policy on h (SEC-07).
+// Set replaces every value, so pinning twice never duplicates a header.
+func (g *Gateway) pinSessionHeaders(h http.Header, cspHost string) {
+	h.Set("Content-Security-Policy", sessionCSP(cspHost, g.embedders))
+	h.Set("Permissions-Policy", g.permissions)
+	h.Set("Cross-Origin-Resource-Policy", "same-origin")
+	h.Set("Cross-Origin-Opener-Policy", "same-origin")
+	h.Set("Origin-Agent-Cluster", "?1")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
+}
+
+// responsePolicy is the ModifyResponse policy for runtime-proxied responses
+// (SEC-07). The runtime is tenant-controlled, so headers that mutate
+// session-origin browser state — any Set-Cookie (OBS-4 hardened: now all
+// names, not just the session cookie), Service-Worker-Allowed,
+// Clear-Site-Data, Refresh, Link (Link: rel=serviceworker registers a
+// service worker) — are dropped outright, and upstream-supplied security
+// headers are deleted so they can never weaken the policy ServeHTTP pinned.
+// Content-Disposition is dropped too: the desktop leg carries no file
+// transfers (those go through the claimed transfer leg, which sets its
+// own), so a runtime cannot turn a desktop path into a one-click download
+// (TM-37).
+func (g *Gateway) responsePolicy(resp *http.Response) error {
+	for _, h := range []string{
+		"Set-Cookie", "Service-Worker-Allowed", "Clear-Site-Data",
+		"Refresh", "Link", "Content-Disposition",
+		"Content-Security-Policy", "Content-Security-Policy-Report-Only",
+		"X-Content-Type-Options", "Strict-Transport-Security",
+		"X-Frame-Options", "Permissions-Policy", "Feature-Policy",
+		"Cross-Origin-Resource-Policy", "Cross-Origin-Opener-Policy",
+		"Origin-Agent-Cluster",
+	} {
+		resp.Header.Del(h)
+	}
+	return nil
+}
+
+// hijackCapture keeps the real net.Conn of upgraded (WebSocket) requests so
+// revoke/fencing can close active streams. wrapConn, when set, replaces the
+// conn handed to the reverse proxy's copy loop — letting us observe
+// client->upstream bytes transparently.
+//
+// It is also the 1xx guard (R1-04): the stdlib ReverseProxy relays an
+// upstream informational response by copying its headers into Header(),
+// calling WriteHeader(1xx) and then clearing the header map, which would
+// erase the policy ServeHTTP pinned. The runtime is tenant-controlled, so
+// informational responses other than 101 are dropped, and pin re-applies
+// the session policy when the final status is written.
+type hijackCapture struct {
+	http.ResponseWriter
+	onHijack func(net.Conn)
+	wrapConn func(net.Conn) net.Conn
+	pin      func(http.Header)
+	wrote    bool
+}
+
+// WriteHeader drops 100 and 102–199, and re-pins the session policy
+// before the first final (or 101) status reaches the client.
+func (h *hijackCapture) WriteHeader(code int) {
+	if code >= 100 && code < 200 && code != http.StatusSwitchingProtocols {
+		return
+	}
+	if !h.wrote {
+		h.wrote = true
+		if h.pin != nil {
+			h.pin(h.ResponseWriter.Header())
+		}
+	}
+	h.ResponseWriter.WriteHeader(code)
+}
+
+func (h *hijackCapture) Write(b []byte) (int, error) {
+	if !h.wrote {
+		h.WriteHeader(http.StatusOK)
+	}
+	return h.ResponseWriter.Write(b)
+}
+
+func (h *hijackCapture) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	// ResponseController walks the Unwrap chain past middleware recorders.
+	c, rw, err := http.NewResponseController(h.ResponseWriter).Hijack()
+	if err == nil && h.wrapConn != nil {
+		c = h.wrapConn(c)
+	}
+	if err == nil && h.onHijack != nil {
+		h.onHijack(c)
+	}
+	return c, rw, err
+}
+
+func (h *hijackCapture) Flush() {
+	if f, ok := h.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (h *hijackCapture) Unwrap() http.ResponseWriter { return h.ResponseWriter }
+
+// statusRecorder captures the response status for metrics; it forwards
+// Hijack/Flush/Unwrap so wrapping never breaks WebSocket upgrades.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	if s.status == 0 {
+		s.status = code
+	}
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *statusRecorder) Write(b []byte) (int, error) {
+	if s.status == 0 {
+		s.status = http.StatusOK
+	}
+	return s.ResponseWriter.Write(b)
+}
+
+func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
+
+func codeClass(status int) string {
+	switch {
+	case status >= 100 && status < 600:
+		return string(rune('0'+status/100)) + "xx"
+	default:
+		return "unknown"
+	}
+}

@@ -1,0 +1,84 @@
+{{- if .Values.gatewayApi.enabled }}
+# Gateway API exposure for both public edges. Portal host: /v1 -> backend
+# app listener, everything else -> frontend. Session domain: the ONE
+# wildcard hostname *.<sessionDomain> covers every workspace host — all
+# of it -> backend session listener. Every backend speaks HTTPS — the
+# Gateway listener must terminate TLS and re-encrypt to the backend (e.g.
+# a BackendTLSPolicy per Service, or your implementation's equivalent);
+# plain HTTP forwarding to these Services will not work.
+#
+# Every field the HTTPRoute CRD defaults on the API server is rendered
+# explicitly (parentRefs group/kind, rules[].matches and backendRefs
+# group/kind/weight) so GitOps diffing (Argo CD, Flux) does not report
+# false drift on an unstructured CR.
+{{- /* Each route resolves its own parentRefs: a non-empty per-route
+       override (gatewayApi.portalParentRefs for the portal host,
+       gatewayApi.sessionParentRefs for *.<sessionDomain>) replaces the
+       shared gatewayApi.parentRefs; empty falls back to the shared
+       list. */ -}}
+{{- $routeRefs := dict }}
+{{- range $route, $refs := dict "portal" (or .Values.gatewayApi.portalParentRefs .Values.gatewayApi.parentRefs) "session" (or .Values.gatewayApi.sessionParentRefs .Values.gatewayApi.parentRefs) }}
+{{- $resolved := list }}
+{{- range $refs }}
+{{- $pr := deepCopy . }}
+{{- if not (hasKey $pr "group") }}{{- $_ := set $pr "group" "gateway.networking.k8s.io" }}{{- end }}
+{{- if not (hasKey $pr "kind") }}{{- $_ := set $pr "kind" "Gateway" }}{{- end }}
+{{- $resolved = append $resolved $pr }}
+{{- end }}
+{{- $_ := set $routeRefs $route $resolved }}
+{{- end }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ .Values.gatewayApi.portalRouteName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tinycdi.componentLabels" (dict "component" "frontend" "root" $) | nindent 4 }}
+  {{- /* Per-route annotations merge OVER the shared map — the per-route
+         value wins on a key collision (same rule as
+         ingress.portalAnnotations). */ -}}
+  {{- $ann := merge (deepCopy .Values.gatewayApi.portalAnnotations) .Values.gatewayApi.annotations }}
+  {{- with $ann }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  parentRefs:
+    {{- toYaml (get $routeRefs "portal") | nindent 4 }}
+  hostnames: [{{ .Values.portalHost | quote }}]
+  rules:
+    # PathPrefix matches per path element: /v1 matches /v1 and /v1/...,
+    # never /v1x. The longest prefix wins, so /v1 beats / below.
+    - matches:
+        - path: {type: PathPrefix, value: /v1}
+      backendRefs:
+        - {group: "", kind: Service, name: backend, port: 8443, weight: 1}
+    - matches:
+        - path: {type: PathPrefix, value: /}
+      backendRefs:
+        - {group: "", kind: Service, name: frontend, port: 8443, weight: 1}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ .Values.gatewayApi.sessionRouteName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tinycdi.componentLabels" (dict "component" "backend" "root" $) | nindent 4 }}
+  {{- $sann := merge (deepCopy .Values.gatewayApi.sessionAnnotations) .Values.gatewayApi.annotations }}
+  {{- with $sann }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  parentRefs:
+    {{- toYaml (get $routeRefs "session") | nindent 4 }}
+  hostnames: [{{ printf "*.%s" .Values.sessionDomain | quote }}]
+  rules:
+    # The API server defaults a missing matches list to PathPrefix / —
+    # rendered here verbatim.
+    - matches:
+        - path: {type: PathPrefix, value: /}
+      backendRefs:
+        - {group: "", kind: Service, name: backend, port: 8444, weight: 1}
+{{- end }}

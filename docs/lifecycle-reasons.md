@@ -1,0 +1,150 @@
+# Workspace condition reasons
+
+`GET /v1/workspaces[/{id}]` serves `phase` and `conditions`. The `reason` of
+a condition is a CamelCase token; the portal's lifecycle progress maps the
+tokens below to steps and wording, and shows an unknown token as a generic
+"working on it" step with the token in the details line. Condition
+`message` text is a fixed string and never carries a Kubernetes or
+operator error.
+
+## Starting (create, start)
+
+Read `RuntimeReady` (and `ConnectionReady`, which carries the same pod
+reason) while it is `False`.
+
+| reason | meaning |
+|---|---|
+| `Provisioning` | the runtime pod does not exist yet, or is not scheduled and reports nothing more |
+| `Unschedulable` | no node can run the pod now (capacity, taints, or an unbound volume; the scheduler gives one reason for all) |
+| `PreparingPod` | scheduled; the kubelet is still setting up the pod sandbox, network and volumes (`PodReadyToStartContainers` is not yet true) |
+| `PullingImage` | the sandbox is ready and the kubelet is pulling an image |
+| `ContainerCreating` | as `PreparingPod`/`PullingImage`, from a kubelet that does not report `PodReadyToStartContainers` |
+| `PodInitializing` | an init container (the Kasm adapter) is running |
+| `ImagePullBackOff`, `ErrImagePull` | an image (including an init container's) cannot be pulled |
+| `CrashLoopBackOff`, `CreateContainerConfigError`, `PodFailed` | the container does not start |
+| `NotReady` | the container runs; the runtime's readiness check has not passed |
+| `WaitingForEndpoint` | `ConnectionReady` only: the desktop answers inside its pod (`RuntimeReady` is `True`), and the cluster has not yet routed the workspace Service to it (seconds) |
+| `BackendError` | the platform could not complete a runtime step (cluster quota, admission, API-server error); it retries with backoff and the boot deadline still applies |
+| `BootDeadlineExceeded` | the start did not finish within the template's `bootDeadline`; `phase` is `Failed` |
+
+`StorageReady` is `False/Provisioning` while a retained home volume is not
+bound, and `False/WaitingForDisk` for a workspace created from retained data
+while the disk is being handed over to it (the claim is named but the volume
+is not yet retargeted; transient, retried). `Degraded/RetainedClaimMissing`
+is different: the claim is not named at all, and the platform refuses to
+start the workspace rather than build an empty disk.
+
+## Failed
+
+Once `phase` is `Failed` the three step conditions are frozen: the reason on
+`ConnectionReady` is the step that stalled (for example `ImagePullBackOff`),
+and it stays after the five-minute cleanup of the failed incarnation.
+`Degraded` carries the failure reason:
+
+| Reason | Meaning | Start |
+|---|---|---|
+| `BootDeadlineExceeded` | The desktop did not become ready within the template's boot deadline. `RuntimeReady` reads the same reason. | Recovers: a new runtime generation on the same home. |
+| `FailedCleanup` | The failed desktop was removed after five minutes. | Recovers. |
+| `RuntimeLost` | A running desktop's pod was deleted, evicted or failed. It is not rebuilt automatically. | Recovers. Old sessions are revoked. |
+| `ImagePolicyDenied` | A node image policy or an admission policy refused the image. A registry error (typo, missing pull secret) is not this reason; it ends as `BootDeadlineExceeded`. | Refused (409 `INVALID_STATE`, `details.reason`). |
+| `HomeVolumeLost` | A Retain workspace's home disk is gone after it had been used. The platform never starts it on an empty disk. | Refused. |
+| `TemplateRejected` | The runtime refused the template's configuration. | Refused. |
+
+Recovery mints a new runtime generation: the pod is rebuilt on the same home
+volume, and leases and launch tickets of the failed generation are revoked
+in the same transaction. A refused reason stays until the cause is fixed;
+then stop and start the workspace (a start after a stop always begins a
+fresh generation), or delete it.
+
+## Stopping
+
+`BackendError` on `RuntimeReady` means the runtime could not be stopped yet
+(retrying). Otherwise `phase` `Stopping` then `Stopped`.
+
+## Deleting
+
+While a workspace is deleted, `RuntimeReady` is `False` with the reason of the
+teardown step in progress, in this order:
+
+`BlockingConnects` → `RevokingLeases` → `DrainingStreams` (up to 45 s;
+`Degraded/StreamDraining` explains the wait, `DrainTimedOut` when the budget
+ran out) → `StoppingRuntime` → `ApplyingRetention` (Retain keeps the disk,
+Ephemeral destroys it; `Degraded/RetentionPending` while it is blocked) →
+`CleaningUp` (`Degraded/CleanupRetry` when a step failed and will retry).
+
+## Intent drift
+
+`IntentBehind` is its own condition type (not a step condition). It is
+`True` when the platform's intent stream trails the workspace's applied
+intent fence — the applier dropped an intent whose revision was behind the
+CR's, which is the signature of a database restored behind the live
+cluster. Intents stay dropped (the fence still never applies a stale
+intent) until the stream is realigned; the operator also emits one
+`IntentBehind` Warning event on the transition into drift. The condition
+goes `False`/`Nominal` once the stream has caught up again. See
+docs/runbooks/disaster-recovery.md ("Workspace reconciliation") for the
+realign procedure.
+
+## Events
+
+`GET /v1/workspaces/{id}/events` serves curated lifecycle and condition
+events. The `reason` tokens are the ones above plus the intent steps
+`Created`, `StartRequested`, `StopRequested`, `IdleTimeout`,
+`DisconnectTimeout`, `MaxDurationReached`, `DeleteRequested` and
+`TemplateUpdateSkipped` (a start whose family re-point the compatibility
+guard refused), and one `Failed.<reason>` warning synthesized from
+`status.phase = Failed`.
+
+## Message parameters (`params`)
+
+`WorkspaceEvent` and `WorkspaceCondition` may carry `params`: a
+flat string map holding the values the message interpolates (or used to
+select it), so a client can localize the full text instead of parsing the
+English. `params` is additive and optional — an absent key means the value
+was not recorded, and clients must keep treating `message` as the fallback
+rendering. Params never carry secrets, tickets or internal hostnames.
+
+| param | produced on | meaning |
+|---|---|---|
+| `revision` | every intent-derived event (`Created`, `StartRequested`, `StopRequested`, `IdleTimeout`, `DisconnectTimeout`, `MaxDurationReached`, `DeleteRequested`, `TemplateUpdateSkipped`) | the intent revision the event id embeds (`StartRequested.4` → `4`) |
+| `cause` | stop events recorded with a platform cause | the broker-recorded stop reason (`idle_timeout`, `disconnect_timeout`, `max_duration`, `requested`) |
+| `skipReason` | `TemplateUpdateSkipped` | the guard token the message parenthesizes: `runtime-changed`, `experience-changed`, `data-policy-changed`, `storage-smaller` |
+| `condition` | every condition-derived event | the `WorkspaceCondition.type` that produced the event |
+| `status` | every condition-derived event | its status (`True`/`False`/`Unknown`) |
+| `step` | teardown marks (`BlockingConnects`…`CleaningUp` on `RuntimeReady`; `CleanupRetry`, `RetentionPending`, `StreamDraining`, `DrainTimedOut` on `Degraded`) | the teardown step token: `block-connects`, `revoke-leases`, `drain-streams`, `stop-runtime`, `retention`, `cleanup` |
+| `budgetSeconds` | `Degraded/StreamDraining`, `Degraded/DrainTimedOut` | the stream-drain budget in seconds |
+| `crRevision` | `IntentBehind` | the Workspace CR's applied intent revision the stream trails |
+| `rowRevision` | `IntentBehind` | the intent revision the platform row/stream presented |
+
+Condition params travel on the
+`workspaces.cdi.tinyorbit.vn/condition-params` object annotation, keyed
+`"<type>.<reason>"`; the API projects only the entry matching each
+condition's type and reason, so a stale entry under a different reason
+never applies.
+
+## API refusal reasons
+
+The error body's `details.reason` is a separate token namespace from
+condition/event reasons — it refines `Error.code` on 4xx/5xx responses.
+Documented values:
+
+| reason | code | params | meaning |
+|---|---|---|---|
+| `release_pending` | `QUOTA_EXHAUSTED` | — | the refused amount is held only by workspaces whose quota release is pending teardown; `retryable: true` + `Retry-After` — retry is safe |
+| `UserLimitReached` | `QUOTA_EXHAUSTED` | `limit`, `current` | the caller already holds their maximum of concurrent running workspaces (a per-principal limit, not the tenant quota): `limit` is their cap, `current` the running workspaces they hold. When the caller's own teardown-pending holds cover the shortfall the response also carries `retryable: true` + `Retry-After` |
+| `ImagePolicyDenied` | `INVALID_STATE` | — | `:start` on a `Failed` workspace whose image was refused by a node or admission policy; a new generation would be refused the same way. Fix the policy or the template image, then stop and start the workspace |
+| `HomeVolumeLost` | `INVALID_STATE` | — | `:start` on a `Failed` Retain workspace whose home volume no longer exists; the platform never starts it on an empty home. Restore the volume (or delete the workspace), then stop and start it |
+| `TemplateRejected` | `INVALID_STATE` | — | `:start` on a `Failed` workspace whose template configuration the runtime refuses. Publish a corrected template revision, then stop and start the workspace |
+
+`params` here is the same flat string map convention as
+`WorkspaceEvent.params` — clients may localize the refusal instead of
+parsing `message`, and unknown keys must be ignored.
+
+## Portal session idle
+
+`POST /v1/session:touch` is the portal's explicit activity beat: every
+cookie-authenticated `GET` is passive, so the only signals that extend the
+session's sliding idle window are mutations, desktop input (measured
+broker-side), and this call — which the portal sends only on user
+interaction (pointer, key, navigation), throttled to one per minute.
+`GET /v1/session` stays anonymous and passive.

@@ -1,0 +1,189 @@
+---
+# runtime-freshness.yml — daily runtime-image freshness gate (D27/D28).
+#
+#   browser-pin  — reruns the bookworm-security apt-pin check for BOTH
+#                  pinned engines (chromium and firefox-esr); when either
+#                  has a newer build — or its pinned version no longer
+#                  exists in the index, which breaks a from-scratch image
+#                  build — it bumps CHROMIUM_APT_VERSION /
+#                  FIREFOX_ESR_APT_VERSION (build/browser/Dockerfile, and
+#                  the linux-desktop image's FIREFOX_ESR_APT_VERSION, the
+#                  same pinned source, + the docs pins) on a chore branch and opens one
+#                  pin-bump PR. Merging it triggers the runtime-images
+#                  train. The run stays red while a pin is stale.
+#                  Formerly ci.yml's weekly `browser-freshness` job —
+#                  daily now, per the SLO.
+#   image-age    — fails when the newest runtime-* GitHub Release is
+#                  older than the 14-day SLO: the train publishes on every
+#                  runtime-image change and weekly, so a gap means the
+#                  train is broken, not that nothing needed rebuilding.
+#
+# Every action is pinned by full commit SHA (version in the trailing
+# comment); permissions are minimal per job.
+
+name: runtime-freshness
+
+"on":
+  schedule:
+    - cron: "11 3 * * *"  # daily freshness check (D27/D28)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+# GitHub's default run shell is `bash -e` — no pipefail — so a failing
+# command piped into sed/grep exits 0 and masks a gate failure (KASM-4).
+# `shell: bash` selects `bash --noprofile --norc -eo pipefail` for every
+# run step.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  browser-pin:
+    name: browser engine freshness → pin-bump PR
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write        # push the pin-bump branch
+      pull-requests: write   # gh pr create
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: check browser engine freshness
+        # SUPR-4: the check fails when bookworm-security offers a newer
+        # chromium or firefox-esr than the pin, or when the pinned version
+        # no longer exists there. It prints one `BUMP <engine> <version>
+        # <deb-sha256>` line per stale engine; those are collected so the
+        # bump below reuses the one lookup.
+        id: check
+        run: |
+          set +e
+          out="$(.github/scripts/check-browser-freshness.sh \
+            build/browser/Dockerfile build/linux-desktop/Dockerfile 2>&1)"
+          rc=$?
+          set -e
+          printf '%s\n' "$out"
+          bumps="$(printf '%s\n' "$out" | sed -n 's/^BUMP \(.*\)$/\1/p')"
+          # engine version sha per line -> engine=version:sha entries
+          # joined with commas (versions/hashes never contain one).
+          list="$(printf '%s\n' "$bumps" | awk 'NF == 3 { printf "%s%s=%s:%s", sep, $1, $2, $3; sep = "," }')"
+          echo "bumps=$list" >> "$GITHUB_OUTPUT"
+          # rc==0 -> pins current; rc==1 with a BUMP line -> stale pin;
+          # anything else is a real error (network/index breakage, pin
+          # missing), not a stale pin.
+          if [ "$rc" -ne 0 ] && [ -z "$list" ]; then
+            echo "::error::freshness check failed without a version to bump to"
+            exit 1
+          fi
+
+      - name: bump the pins on a chore branch
+        # Idempotent: an already-open PR for these versions ends the run.
+        id: bump
+        if: steps.check.outputs.bumps != ''
+        env:
+          BUMPS: ${{ steps.check.outputs.bumps }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # One branch covers every stale engine. git refs reject '~'
+          # (Debian revision separator): fold it; drop the deb hashes.
+          BRANCH="chore/browser-pin-$(sed -e 's/:[0-9a-f]\{64\}//g' \
+            -e 's/=/-/g' -e 's/,/_/g' -e 's/~/_/g' <<< "$BUMPS")"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          existing="$(gh pr list --state open --head "$BRANCH" \
+            --json number --jq 'length')"
+          if [ "$existing" != "0" ]; then
+            echo "an open PR already tracks $BRANCH — nothing to do"
+            echo "bump_pr=exists" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          SUMMARY=""
+          IFS=',' read -r -a entries <<< "$BUMPS"
+          for entry in "${entries[@]}"; do
+            engine="${entry%%=*}"; rest="${entry#*=}"
+            version="${rest%%:*}"; sha="${rest#*:}"
+            BUMP_DEB_SHA256="$sha" \
+              BUMP_DESKTOP_DOCKERFILE=build/linux-desktop/Dockerfile \
+              .github/scripts/bump-browser-pin.sh \
+              "$engine" "$version" build/browser/Dockerfile docs/images.md \
+              docs/compatibility.md NOTICE THIRD_PARTY_LICENSES.md
+            SUMMARY="${SUMMARY:+$SUMMARY, }$engine $version"
+          done
+          echo "summary=$SUMMARY" >> "$GITHUB_OUTPUT"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # A closed-but-unmerged bump branch may still exist remotely;
+          # fetch it so --force-with-lease has the lease, then re-push the
+          # fresh bump cut from current main.
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            git fetch -q origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"
+          fi
+          git switch -c "$BRANCH"
+          git add build/browser/Dockerfile build/linux-desktop/Dockerfile \
+            docs/images.md docs/compatibility.md NOTICE THIRD_PARTY_LICENSES.md
+          git commit -m "build(browser): bump browser apt pins ($SUMMARY)"
+          gh auth setup-git
+          git push --force-with-lease -u origin "$BRANCH"
+
+      - name: open the pin-bump PR
+        if: >-
+          steps.check.outputs.bumps != ''
+          && steps.bump.outputs.bump_pr != 'exists'
+        env:
+          SUMMARY: ${{ steps.bump.outputs.summary }}
+          BRANCH: ${{ steps.bump.outputs.branch }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr create --base main --head "$BRANCH" \
+            --title "build(browser): bump browser pins ($SUMMARY)" \
+            --body-file - <<EOF
+          bookworm-security no longer matches the browser image's apt
+          pins (SUPR-4 freshness signal): $SUMMARY. A pin is stale when a
+          newer build exists, or when the pinned version is gone from the
+          index — the latter breaks a from-scratch browser image build.
+
+          Bumps \`CHROMIUM_APT_VERSION\` / \`FIREFOX_ESR_APT_VERSION\` in
+          \`build/browser/Dockerfile\` (and \`FIREFOX_ESR_APT_VERSION\` in
+          \`build/linux-desktop/Dockerfile\`, the same pinned source), the doc pins in \`docs/images.md\` /
+          \`docs/compatibility.md\` (firefox-esr: with its deb sha256) and
+          the shipped-version lists in \`NOTICE\` /
+          \`THIRD_PARTY_LICENSES.md\`.
+          Merging triggers the runtime-images train, which rebuilds,
+          scans, signs and publishes the runtime images and refreshes
+          \`runtime-images.json\` on the daily \`runtime-*\` release.
+          A major engine bump (e.g. a new Firefox ESR) also needs the
+          browser runtime contract re-run before merging
+          (\`TCDI_IT_BUILD=1 go test -tags=integration ./tests/integration -run TestLinuxRuntime\`).
+
+          Opened by the runtime-freshness workflow.
+          EOF
+
+      - name: fail the run while a pin is stale
+        # The daily run stays red until the pin-bump PR merges — the
+        # visible freshness signal (SUPR-4); the PR above is the fix.
+        if: ${{ !cancelled() && steps.check.outputs.bumps != '' }}
+        env:
+          BUMPS: ${{ steps.check.outputs.bumps }}
+        run: |
+          echo "::error::stale browser apt pins ($BUMPS) — pin-bump PR opened or already tracked; merge it to turn this run green"
+          exit 1
+
+  image-age:
+    # D28: no published runtime image older than 14 days. Fails the
+    # workflow (visible red signal) when the newest runtime-* release
+    # breaches the SLO — including "no runtime release exists yet".
+    name: runtime release age (14-day SLO)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: newest runtime-* release age
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: .github/scripts/check-runtime-image-age.sh

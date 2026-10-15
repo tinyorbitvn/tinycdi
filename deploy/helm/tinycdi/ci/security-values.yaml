@@ -1,0 +1,93 @@
+# Security exercise set: DB TLS (PGSSLMODE/PGSSLROOTCERT), declared
+# cluster CIDRs with a seeded InternetOnly template, backend metrics on the
+# dedicated scrape path, and ingress edge TLS.
+managedNamespaces:
+  - name: tinycdi-tenant-a
+    tenant: tenant-a
+
+portalHost: portal.lab.example.net
+sessionDomain: session.lab.example.net
+
+oidc:
+  issuer: https://idp.lab.example.net/realms/tinycdi
+  clientID: tinycdi
+  existingSecret: tinycdi-oidc-client
+  egressCIDRs: [10.30.0.0/16]
+  port: 443
+
+database:
+  existingSecret: tinycdi-backend-db
+  port: 5432
+  allowedPeers:
+    - ipBlock: {cidr: 10.20.30.40/32}
+  tls:
+    mode: verify-full
+    caSecret:
+      name: tinycdi-db-ca
+      key: ca.crt
+
+operator:
+  # This cluster's pod/service/node ranges — required for InternetOnly.
+  clusterCIDRs: [10.42.0.0/16, 10.43.0.0/16, 192.168.0.0/16]
+
+backend:
+  loginKeys:
+    existingSecret: tinycdi-backend-login-keys
+  metrics:
+    enabled: true
+  tls:
+    session: {existingSecret: tinycdi-backend-session-tls}
+    internal: {existingSecret: tinycdi-backend-internal-tls}
+  clientCA:
+    existingSecret: tinycdi-extra-ca
+
+frontend:
+  tls:
+    existingSecret: tinycdi-frontend-tls
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+  tls:
+    existingSecret: tinycdi-ingress-tls
+
+serviceMonitor:
+  enabled: true
+  labels: {release: prometheus}
+
+networkPolicy:
+  apiServerPeers:
+    - ipBlock: {cidr: 10.96.0.1/32}
+  prometheusPeers:
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: monitoring}
+      podSelector:
+        matchLabels: {app.kubernetes.io/name: prometheus}
+
+templates:
+  - name: webdesk1
+    namespace: tinycdi-tenant-a
+    spec:
+      revision: "2026-10-a"
+      runtime: LinuxContainer
+      experience: Desktop
+      linux:
+        image: registry.lab.example.net/tinycdi/linux-desktop@sha256:5555555555555555555555555555555555555555555555555555555555555555
+      resources: {cpu: "1", memory: 2Gi, storage: 5Gi}
+      networkProfile: InternetOnly
+      clipboardPolicy: Disabled
+      lifecycle:
+        idleTimeout: 30m
+        disconnectTimeout: 5m
+        maxDuration: 8h
+        dataPolicy: Ephemeral
+
+# ci/dev clusters (kind) carry no dedicated workspace pool — opt out of
+# the default dedicated placement. Production values should keep
+# runtime.placement.allowSharedNodes: false and prepare the pool per
+# docs/runbooks/install.md "Workspace node pool".
+runtime:
+  placement:
+    allowSharedNodes: true

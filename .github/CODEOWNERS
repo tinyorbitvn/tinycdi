@@ -1,0 +1,22 @@
+# CODEOWNERS — required reviewers for sensitive paths (SEC-19).
+#
+# Single maintainer today: everything routes to @vanlongme (owner
+# decision 2026-10-01 — no org team). Enable "Require review from Code
+# Owners" for main once a second maintainer exists; the branch protection
+# applied by .github/scripts/setup-repo-protection.sh keeps
+# required_approving_review_count at 0 until then.
+
+*                    @vanlongme
+
+# Supply chain + release machinery
+/.github/            @vanlongme
+/build/              @vanlongme
+
+# Deployment manifests
+/deploy/             @vanlongme
+/config/             @vanlongme
+
+# Dependency manifests
+/go.mod              @vanlongme
+/go.sum              @vanlongme
+/web/package*.json   @vanlongme

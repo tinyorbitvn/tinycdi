@@ -1,0 +1,267 @@
+import { describe, expect, it } from "vitest";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { CreateWorkspacePage } from "../../../src/workspaces/CreateWorkspacePage";
+import { createMockApi, renderWithApi, loginCookies } from "../helpers";
+import { TEMPLATE_LINUX, TEMPLATE_BROWSER, type TemplateFixture } from "../../mock-api/fixtures.ts";
+
+interface CreateCall {
+  headers: Record<string, string>;
+  rawBody: string;
+}
+
+// Intercepts POST /v1/workspaces so the test controls failures while still
+// recording every attempt (including ones rejected before the mock's own
+// request log).
+function interceptCreates(
+  api: ReturnType<typeof createMockApi>,
+  failFirst: { status: number; body: object } | null,
+) {
+  const calls: CreateCall[] = [];
+  const origHandle = api.handle;
+  api.handle = (req) => {
+    if (req.method === "POST" && req.path === "/v1/workspaces") {
+      calls.push({ headers: req.headers, rawBody: req.rawBody ?? "" });
+      if (failFirst) {
+        const resp = failFirst;
+        failFirst = null;
+        return {
+          status: resp.status,
+          headers: { "content-type": "application/json" },
+          body: resp.body,
+        };
+      }
+    }
+    return origHandle(req);
+  };
+  return calls;
+}
+
+async function fillForm(templateId: string) {
+  const nameInput = await screen.findByLabelText(/Name/);
+  fireEvent.change(nameInput, { target: { value: "my-box" } });
+  const select = await screen.findByLabelText(/Template/);
+  await waitFor(() => expect(select.querySelectorAll("option").length).toBeGreaterThan(1));
+  fireEvent.change(select, { target: { value: templateId } });
+}
+
+describe("CreateWorkspacePage", () => {
+  it("create: idempotency key is reused when retrying a failed submit", async () => {
+    const api = createMockApi();
+    loginCookies();
+    const calls = interceptCreates(api, {
+      status: 500,
+      body: { error: { code: "INTERNAL", message: "boom", retryable: true, requestId: "r1" } },
+        });
+    renderWithApi(<CreateWorkspacePage />, api);
+    await fillForm(TEMPLATE_LINUX.id);
+
+    const submit = screen.getByRole("button", { name: "Create workspace" });
+    fireEvent.click(submit);
+    await screen.findByRole("alert");
+
+    fireEvent.click(await screen.findByRole("button", { name: "Create workspace" }));
+    await waitFor(() => expect(calls).toHaveLength(2));
+
+    expect(calls[0]!.headers["idempotency-key"]).toBeTruthy();
+    expect(calls[1]!.headers["idempotency-key"]).toBe(calls[0]!.headers["idempotency-key"]);
+    expect(calls[1]!.rawBody).toBe(calls[0]!.rawBody);
+  }, 20000);
+
+  it("create: ephemeral warning appears before submit", async () => {
+    const api = createMockApi();
+    loginCookies();
+    renderWithApi(<CreateWorkspacePage />, api);
+    await fillForm(TEMPLATE_BROWSER.id); // dataPolicyDefault: Ephemeral
+
+    const notice = await screen.findByText("Data is not kept");
+    expect(notice).toBeVisible();
+    expect(screen.getByText(/destroys the disk/)).toBeVisible();
+    // Shown before submit: no create request has gone out yet.
+    expect(
+      api.state.requests.filter((r) => r.method === "POST" && r.path === "/v1/workspaces"),
+    ).toHaveLength(0);
+  }, 20000);
+
+  it("create: no ephemeral warning for a Retain template", async () => {
+    const api = createMockApi();
+    loginCookies();
+    renderWithApi(<CreateWorkspacePage />, api);
+    await fillForm(TEMPLATE_LINUX.id); // dataPolicyDefault: Retain
+
+    await waitFor(() => expect(screen.getByLabelText(/Template/)).toHaveValue(TEMPLATE_LINUX.id));
+    expect(screen.queryByText("Data is not kept")).not.toBeInTheDocument();
+  }, 20000);
+
+  it("create: successful create navigates to the new workspace", async () => {
+    const api = createMockApi();
+    loginCookies();
+    const calls = interceptCreates(api, null);
+    renderWithApi(<CreateWorkspacePage />, api);
+    await fillForm(TEMPLATE_LINUX.id);
+
+    fireEvent.click(screen.getByRole("button", { name: "Create workspace" }));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    await waitFor(() => expect(window.location.pathname).toMatch(/^\/workspaces\/ws_/));
+  }, 20000);
+
+  // FX-R17: the two quota refusals read differently — real exhaustion tells
+  // the user to free resources; a tenant with no quota at all tells them to
+  // ask an administrator to set one.
+  it.each([
+    [
+      "QUOTA_EXHAUSTED",
+      "Quota exhausted — delete an unused workspace or ask an administrator for more quota.",
+    ],
+    [
+      "QUOTA_NOT_CONFIGURED",
+      "No quota is configured for your tenant. Ask an administrator to set one.",
+    ],
+  ])("create: %s shows its own guidance", async (code, message) => {
+    const api = createMockApi();
+    loginCookies();
+    interceptCreates(api, {
+      status: 409,
+      body: { error: { code, message: "server detail", retryable: false, requestId: "r-quota" } },
+    });
+    renderWithApi(<CreateWorkspacePage />, api);
+    await fillForm(TEMPLATE_LINUX.id);
+
+    fireEvent.click(screen.getByRole("button", { name: "Create workspace" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(code);
+    expect(alert).toHaveTextContent(message);
+    // Neither refusal is retryable: no Retry button.
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+  }, 20000);
+
+  // QS-FLAKE: QUOTA_EXHAUSTED + details.reason=release_pending is the
+  // transient teardown refusal — it gets its own "still shutting down"
+  // copy instead of the exhaustion guidance.
+  it("create: release-pending quota refusal shows the transient copy", async () => {
+    const api = createMockApi();
+    loginCookies();
+    interceptCreates(api, {
+      status: 409,
+      body: { error: {
+        code: "QUOTA_EXHAUSTED",
+        message: "quota exhausted",
+        retryable: true,
+        requestId: "r-rp",
+        details: { reason: "release_pending" },
+      } },
+    });
+    renderWithApi(<CreateWorkspacePage />, api);
+    await fillForm(TEMPLATE_LINUX.id);
+
+    fireEvent.click(screen.getByRole("button", { name: "Create workspace" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("QUOTA_EXHAUSTED");
+    expect(alert).toHaveTextContent(
+      "A workspace is still shutting down; its quota is released within about 30 s. Try again in a moment.",
+    );
+    expect(alert).not.toHaveTextContent("delete an unused workspace");
+  }, 20000);
+
+  // USER-LIMITS: QUOTA_EXHAUSTED + details.reason=UserLimitReached
+  // names the caller's own running cap — the banner interpolates
+  // details.params limit/current into dedicated copy.
+  it("create: per-user limit refusal shows the limit copy with params", async () => {
+    const api = createMockApi();
+    loginCookies();
+    interceptCreates(api, {
+      status: 409,
+      body: { error: {
+        code: "QUOTA_EXHAUSTED",
+        message: "per-user running-workspace limit reached",
+        retryable: false,
+        requestId: "r-ul",
+        details: { reason: "UserLimitReached", params: { limit: "2", current: "2" } },
+      } },
+    });
+    renderWithApi(<CreateWorkspacePage />, api);
+    await fillForm(TEMPLATE_LINUX.id);
+
+    fireEvent.click(screen.getByRole("button", { name: "Create workspace" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("QUOTA_EXHAUSTED");
+    expect(alert).toHaveTextContent(
+      "You have reached your running-workspace limit (2 of 2).",
+    );
+    expect(alert).not.toHaveTextContent("delete an unused workspace");
+  }, 20000);
+
+  // V3.3 (E3): a template over the -image-block-after limit reports
+  // imageBlocked — the create submit is disabled and the reason is shown
+  // before any request goes out.
+  it("create: stale template is disabled with a reason", async () => {
+    const api = createMockApi();
+    api.state.templates.push({
+      ...structuredClone(TEMPLATE_BROWSER),
+      id: "tpl_blockedimg",
+      name: "blocked-browser",
+      imageStale: true,
+      imageBlocked: true,
+      imageBuiltAt: "2026-08-01T00:00:00Z",
+    } as TemplateFixture);
+    loginCookies();
+    const calls = interceptCreates(api, null);
+    renderWithApi(<CreateWorkspacePage />, api);
+    await fillForm("tpl_blockedimg");
+
+    const reason = (await screen.findAllByRole("alert")).find((a) =>
+      a.textContent?.includes("Image too old"),
+    );
+    expect(reason).toBeDefined();
+    expect(reason).toHaveTextContent("older than the freshness limit");
+    expect(screen.getByRole("button", { name: "Create workspace" })).toBeDisabled();
+    expect(calls).toHaveLength(0);
+  }, 20000);
+
+  // V3.3: a server-side IMAGE_STALE refusal (e.g. the image went stale
+  // between catalog load and submit) names the template and its ages from
+  // error details; the pinned hint appears only for pinned workspaces.
+  it.each([
+    ["not pinned", false, /does not mention pinning/],
+    ["pinned", true, /says a fresh image is required/],
+  ])("create: IMAGE_STALE refusal guidance (%s)", async (_label, pinned, _check) => {
+    const api = createMockApi();
+    loginCookies();
+    interceptCreates(api, {
+      status: 409,
+      body: { error: {
+        code: "IMAGE_STALE",
+        message: 'template "linux-chromium-browser" runtime image is 60 days old (limit 45 days)',
+        retryable: false,
+        requestId: "r-stale",
+        details: {
+          templateName: "linux-chromium-browser",
+          ageDays: 60,
+          limitDays: 45,
+          pinned,
+        },
+      } },
+    });
+    renderWithApi(<CreateWorkspacePage />, api);
+    await fillForm(TEMPLATE_BROWSER.id);
+
+    fireEvent.click(screen.getByRole("button", { name: "Create workspace" }));
+    // The Ephemeral-policy notice is an alert too; wait for the error
+    // banner specifically.
+    await waitFor(() => {
+      expect(
+        screen.getAllByRole("alert").some((a) => a.textContent?.includes("IMAGE_STALE")),
+      ).toBe(true);
+    });
+    const alert = screen
+      .getAllByRole("alert")
+      .find((a) => a.textContent?.includes("IMAGE_STALE"))!;
+    expect(alert).toHaveTextContent(
+      "Template linux-chromium-browser's runtime image is 60 days old — over the 45-day freshness limit",
+    );
+    if (pinned) {
+      expect(alert).toHaveTextContent("only after an administrator publishes a fresh image");
+    } else {
+      expect(alert).not.toHaveTextContent("only after an administrator publishes a fresh image");
+    }
+  }, 20000);
+});

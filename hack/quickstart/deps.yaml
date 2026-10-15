@@ -1,0 +1,165 @@
+# Dependencies the TinyCDI chart deliberately does not bundle: PostgreSQL and
+# an OIDC provider (DEV ONLY - throwaway data, loopback-only credentials).
+# Secrets are created by up.sh; images are substituted from common.sh pins
+# (@POSTGRES_IMAGE@, @KEYCLOAK_IMAGE@, @KEYCLOAK_HOST@).
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: tcdi-qs-deps
+  labels: {app.kubernetes.io/name: postgres, app.kubernetes.io/part-of: tcdi-quickstart}
+spec:
+  selector: {app.kubernetes.io/name: postgres}
+  ports:
+    - {name: postgres, port: 5432, targetPort: postgres}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: tcdi-qs-deps
+  labels: {app.kubernetes.io/name: postgres, app.kubernetes.io/part-of: tcdi-quickstart}
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: postgres}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: postgres, app.kubernetes.io/part-of: tcdi-quickstart}
+    spec:
+      securityContext:
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: postgres
+          image: "@POSTGRES_IMAGE@"
+          # TLS on, with the quickstart CA's server certificate: the TinyCDI
+          # backend refuses a database connection it cannot verify.
+          args:
+            - -c
+            - ssl=on
+            - -c
+            - ssl_cert_file=/tls/tls.crt
+            - -c
+            - ssl_key_file=/tls/tls.key
+          env:
+            - {name: POSTGRES_DB, value: tinycdi}
+            - {name: POSTGRES_USER, value: tinycdi}
+            - name: POSTGRES_PASSWORD
+              valueFrom: {secretKeyRef: {name: postgres-auth, key: password}}
+            - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+          ports:
+            - {name: postgres, containerPort: 5432}
+          readinessProbe:
+            exec: {command: [pg_isready, -U, tinycdi, -d, tinycdi]}
+            periodSeconds: 3
+            failureThreshold: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/postgresql/data}
+            - {name: tls, mountPath: /tls, readOnly: true}
+      volumes:
+        - name: tls
+          secret:
+            secretName: postgres-tls
+            # root-owned key readable by the fsGroup: postgres accepts
+            # root:<group> 0640 key files.
+            defaultMode: 416 # 0640
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 1Gi}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: tcdi-qs-deps
+  labels: {app.kubernetes.io/name: keycloak, app.kubernetes.io/part-of: tcdi-quickstart}
+spec:
+  selector: {app.kubernetes.io/name: keycloak}
+  ports:
+    - {name: http, port: 8080, targetPort: http}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  namespace: tcdi-qs-deps
+  labels: {app.kubernetes.io/name: keycloak, app.kubernetes.io/part-of: tcdi-quickstart}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app.kubernetes.io/name: keycloak}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: keycloak, app.kubernetes.io/part-of: tcdi-quickstart}
+    spec:
+      securityContext:
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: keycloak
+          image: "@KEYCLOAK_IMAGE@"
+          # start-dev: embedded H2 database, DEV ONLY. The realm is imported
+          # once from the ConfigMap below.
+          args: [start-dev, --import-realm]
+          env:
+            - {name: KC_HOSTNAME, value: "https://@KEYCLOAK_HOST@"}
+            - {name: KC_HTTP_ENABLED, value: "true"}
+            - {name: KC_PROXY_HEADERS, value: xforwarded}
+            - {name: KC_HEALTH_ENABLED, value: "true"}
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              valueFrom: {secretKeyRef: {name: keycloak-admin, key: username}}
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom: {secretKeyRef: {name: keycloak-admin, key: password}}
+            - {name: JAVA_OPTS_APPEND, value: "-Xms256m -Xmx768m"}
+          ports:
+            - {name: http, containerPort: 8080}
+            - {name: management, containerPort: 9000}
+          readinessProbe:
+            httpGet: {path: /health/ready, port: management}
+            periodSeconds: 5
+            failureThreshold: 60
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 250m, memory: 768Mi}
+            limits: {cpu: "2", memory: 1280Mi}
+          volumeMounts:
+            - {name: realm, mountPath: /opt/keycloak/data/import, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: realm
+          secret: {secretName: keycloak-realm}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: keycloak
+  namespace: tcdi-qs-deps
+  labels: {app.kubernetes.io/name: keycloak, app.kubernetes.io/part-of: tcdi-quickstart}
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: "@KEYCLOAK_HOST@"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend: {service: {name: keycloak, port: {name: http}}}
+  tls:
+    - hosts: ["@KEYCLOAK_HOST@"]
+      secretName: edge-tls

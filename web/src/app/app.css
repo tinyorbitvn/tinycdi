@@ -1,0 +1,214 @@
+/* App shell: top bar (brand, theme, user), section sidebar, content area.
+ * Loaded by styles/base.css; tokens come from styles/tokens.css (--tc-*). */
+
+.tc-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+/* Skip link: first in tab order, hidden until focused (WCAG 2.4.1). */
+.tc-skip-link {
+  position: absolute;
+  top: var(--tc-space-2);
+  left: var(--tc-space-2);
+  z-index: calc(var(--tc-z-overlay) + 1);
+  padding: var(--tc-space-2) var(--tc-space-3);
+  border-radius: var(--tc-radius-md);
+  background: var(--tc-color-surface-raised);
+  color: var(--tc-color-accent-text);
+  font-size: var(--tc-text-sm);
+  font-weight: var(--tc-weight-semibold);
+  text-decoration: none;
+  box-shadow: var(--tc-shadow-md);
+  transform: translateY(calc(-100% - var(--tc-space-2)));
+  transition: transform var(--tc-duration-fast) var(--tc-ease);
+}
+
+.tc-skip-link:focus,
+.tc-skip-link:focus-visible {
+  transform: none;
+  outline: 2px solid var(--tc-color-focus);
+  outline-offset: 3px;
+}
+
+/* ---------- top bar ---------- */
+.tc-topbar {
+  position: sticky;
+  top: 0;
+  z-index: var(--tc-z-topbar);
+  display: flex;
+  align-items: center;
+  gap: var(--tc-space-4);
+  height: var(--tc-topbar-height, 76px);
+  padding: 0 var(--tc-space-6);
+  background: var(--tc-color-surface);
+  border-bottom: 1px solid var(--tc-color-border);
+}
+
+.tc-topbar__brand {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--tc-space-2);
+  min-width: 0;
+  color: var(--tc-color-text);
+  text-decoration: none;
+  border-radius: var(--tc-radius-sm);
+}
+
+.tc-topbar__mark {
+  align-self: center;
+  width: 28px;
+  height: 28px;
+}
+
+.tc-topbar__name {
+  font-size: var(--tc-text-lg);
+  font-weight: var(--tc-weight-bold);
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.tc-topbar__byline {
+  font-size: var(--tc-text-sm);
+  color: var(--tc-color-text-subtle);
+  white-space: nowrap;
+}
+
+/* Hamburger: hidden on desktop, shown when the sidebar collapses.
+ * Nested under .tc-topbar so it wins over .tc-button's inline-flex
+ * (design.css loads after this sheet). */
+.tc-topbar .tc-topbar__nav-toggle {
+  display: none;
+  flex: none;
+}
+
+.tc-topbar__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--tc-space-3);
+  margin-left: auto;
+}
+
+.tc-topbar__user {
+  font-size: var(--tc-text-sm);
+  color: var(--tc-color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 16rem;
+  display: block;
+}
+
+.tc-topbar__identity {
+  display: flex;
+  flex-direction: column;
+  gap: var(--tc-space-1);
+  font-size: var(--tc-text-sm);
+  max-width: 16rem;
+  overflow-wrap: anywhere;
+}
+
+.tc-topbar__tenant {
+  color: var(--tc-color-text-muted);
+}
+
+/* Public signed-out page: no shell, content centred in the viewport. */
+.tc-signedout {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--tc-space-6);
+}
+
+/* ---------- body: sidebar + content ---------- */
+.tc-shell__body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.tc-sidebar {
+  flex: none;
+  width: var(--sidebar-width, 244px);
+  padding: var(--tc-space-4) var(--tc-space-3);
+  background: var(--tc-color-bg-subtle);
+  border-right: 1px solid var(--tc-color-border);
+}
+
+.tc-sidebar__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* .tc-nav is shared by the desktop sidebar and the small-screen drawer. */
+.tc-nav a {
+  display: flex;
+  align-items: center;
+  gap: var(--tc-space-3);
+  min-height: var(--tc-control-height-sm);
+  padding: var(--tc-space-2) var(--tc-space-3);
+  border-radius: var(--tc-radius-md);
+  color: var(--tc-color-text-muted);
+  font-size: var(--tc-text-sm);
+  font-weight: var(--tc-weight-medium);
+  text-decoration: none;
+  transition:
+    background-color var(--tc-duration-fast) var(--tc-ease),
+    color var(--tc-duration-fast) var(--tc-ease);
+}
+
+.tc-nav a:hover {
+  background: var(--tc-color-surface-sunken);
+  color: var(--tc-color-text);
+}
+
+.tc-nav a.is-active {
+  background: var(--tc-color-accent-subtle);
+  color: var(--tc-color-accent-text);
+  font-weight: var(--tc-weight-semibold);
+}
+
+.tc-content {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+}
+
+.tc-content--bleed {
+  display: flex;
+  flex-direction: column;
+}
+
+.tc-content__loading {
+  display: flex;
+  justify-content: center;
+  padding-top: var(--tc-space-16);
+}
+
+/* Small screens: collapse the sidebar behind the hamburger + nav drawer,
+ * and drop the brand byline so the top bar still fits. */
+@media (max-width: 48rem) {
+  .tc-sidebar {
+    display: none;
+  }
+
+  .tc-topbar .tc-topbar__nav-toggle {
+    display: inline-flex;
+  }
+
+  .tc-topbar__byline {
+    display: none;
+  }
+
+  /* Keep the account menu but drop the name text — the hamburger leaves
+   * no room for it at this width. */
+  .tc-topbar__user {
+    display: none;
+  }
+}

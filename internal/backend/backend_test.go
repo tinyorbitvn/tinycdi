@@ -1,0 +1,1388 @@
+// Copyright (c) 2026 TinyOrbit
+// SPDX-License-Identifier: MIT
+
+package backend
+
+// Backend-level tests: listener route isolation (D7/P9), the drain-ordered
+// shutdown, and the shared gateway identity across replicas.
+
+import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha1"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"math/big"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/tinyorbitvn/tinycdi/internal/api"
+	"github.com/tinyorbitvn/tinycdi/internal/api/loginstate"
+	"github.com/tinyorbitvn/tinycdi/internal/api/oidctest"
+	"github.com/tinyorbitvn/tinycdi/internal/broker"
+	"github.com/tinyorbitvn/tinycdi/internal/broker/httpapi"
+	"github.com/tinyorbitvn/tinycdi/internal/gateway"
+	"github.com/tinyorbitvn/tinycdi/internal/observability"
+	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
+	"github.com/tinyorbitvn/tinycdi/internal/sessionhost"
+	"github.com/tinyorbitvn/tinycdi/internal/store"
+)
+
+func testLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+// testControlToken is a control bearer of the minimum accepted length
+// (minControlTokenBytes).
+const testControlToken = "0123456789abcdef0123456789abcdef"
+
+// controlHostGet GETs path on the session listener at base with the
+// control Host the drain tests configure (-session-control-hosts
+// session.test): health answers on control hosts only.
+func controlHostGet(c *http.Client, base, path string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodGet, base+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Host = "session.test"
+	return c.Do(req)
+}
+
+// countingHandler records how many requests reach it — used to prove a
+// listener never delegates to another listener's mux.
+type countingHandler struct {
+	next http.Handler
+	hits int
+}
+
+func (c *countingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	c.hits++
+	c.next.ServeHTTP(w, r)
+}
+
+// ---------------------------------------------------------------------------
+// Session-fake broker (the gateway.BrokerClient contract, in-process).
+// ---------------------------------------------------------------------------
+
+// fakeBrokerClient is a scripted gateway.BrokerClient: tickets map to the
+// lease a redeem would mint; activity and revocations are recorded.
+type fakeBrokerClient struct {
+	mu       sync.Mutex
+	leases   map[string]broker.Lease // ticket token -> lease to mint
+	redeemed map[string]bool
+	renewErr map[string]error
+	resolveT map[string]broker.Target
+	revokes  []string
+	activity []broker.ActivityEventType
+	upstream *httptest.Server
+}
+
+func newFakeBrokerClient(t *testing.T) *fakeBrokerClient {
+	t.Helper()
+	fb := &fakeBrokerClient{
+		leases:   map[string]broker.Lease{},
+		redeemed: map[string]bool{},
+		renewErr: map[string]error{},
+		resolveT: map[string]broker.Target{},
+		upstream: httptest.NewTLSServer(http.HandlerFunc(fakeWSUpstream)),
+	}
+	t.Cleanup(fb.upstream.Close)
+	return fb
+}
+
+func (f *fakeBrokerClient) scriptTicket(ticket, wsUID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	l := broker.Lease{
+		ID:                "lease-" + ticket,
+		WorkspaceUID:      wsUID,
+		TenantID:          "tenant-a",
+		PrincipalSubject:  "iss|alice",
+		RuntimeGeneration: 1,
+		RuntimeUID:        "rt-1",
+		FencingVersion:    1,
+		ExpiresAt:         time.Now().Add(broker.LeaseTTL),
+	}
+	f.leases[ticket] = l
+	f.resolveT[l.ID] = wsTargetFor(f.upstream)
+}
+
+// wsTargetFor builds a broker.Target pointing at a TLS httptest server,
+// pinning its leaf certificate as the CA bundle.
+func wsTargetFor(srv *httptest.Server) broker.Target {
+	return broker.Target{
+		Protocol:      "kasmvnc-websocket",
+		ServiceDNS:    strings.TrimPrefix(srv.URL, "https://"),
+		UpstreamURL:   srv.URL,
+		TLSServerName: "127.0.0.1",
+		TLSCA: pem.EncodeToMemory(&pem.Block{
+			Type:  "CERTIFICATE",
+			Bytes: srv.Certificate().Raw,
+		}),
+		Username: "kasm_user",
+		Password: "upstream-secret",
+	}
+}
+
+// fakeWSUpstream answers 200 to plain GETs and completes a websocket
+// upgrade with a raw echo loop (enough for the proxy's duplex-copy path).
+func fakeWSUpstream(w http.ResponseWriter, r *http.Request) {
+	if !wsUpgradeOffer(r) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+		return
+	}
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "no hijack", http.StatusInternalServerError)
+		return
+	}
+	c, rw, err := hj.Hijack()
+	if err != nil {
+		return
+	}
+	defer c.Close()
+	sum := sha1.Sum([]byte(r.Header.Get("Sec-WebSocket-Key") +
+		"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+	_, _ = rw.WriteString("HTTP/1.1 101 Switching Protocols\r\n" +
+		"Upgrade: websocket\r\nConnection: upgrade\r\n" +
+		"Sec-WebSocket-Accept: " + base64.StdEncoding.EncodeToString(sum[:]) +
+		"\r\n\r\n")
+	_ = rw.Flush()
+	_, _ = io.Copy(struct{ io.Writer }{c}, struct{ io.Reader }{rw})
+}
+
+func wsUpgradeOffer(r *http.Request) bool {
+	conn := false
+	for _, v := range r.Header.Values("Connection") {
+		for _, tok := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(tok), "upgrade") {
+				conn = true
+			}
+		}
+	}
+	return conn && strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
+}
+
+func (f *fakeBrokerClient) RedeemTicket(_ context.Context, gw broker.GatewayIdentity, opaque string) (broker.Lease, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	l, ok := f.leases[opaque]
+	if !ok || f.redeemed[opaque] {
+		return broker.Lease{}, broker.ErrTicketInvalid
+	}
+	f.redeemed[opaque] = true
+	l.GatewayID = gw.ID
+	return l, nil
+}
+
+func (f *fakeBrokerClient) RenewLease(_ context.Context, _ broker.GatewayIdentity, leaseID string, _ broker.Fence) (broker.Lease, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.renewErr[leaseID]; err != nil {
+		return broker.Lease{}, err
+	}
+	for _, l := range f.leases {
+		if l.ID == leaseID {
+			l.ExpiresAt = time.Now().Add(broker.LeaseTTL)
+			return l, nil
+		}
+	}
+	return broker.Lease{}, broker.ErrLeaseInvalid
+}
+
+func (f *fakeBrokerClient) ResolveTarget(_ context.Context, _ broker.GatewayIdentity, leaseID string) (broker.Target, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if tgt, ok := f.resolveT[leaseID]; ok {
+		return tgt, nil
+	}
+	return broker.Target{}, broker.ErrLeaseInvalid
+}
+
+func (f *fakeBrokerClient) RevokeLease(_ context.Context, leaseID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.revokes = append(f.revokes, leaseID)
+	return nil
+}
+
+func (f *fakeBrokerClient) RevokeLeaseChanged(ctx context.Context, leaseID string) (bool, error) {
+	return true, f.RevokeLease(ctx, leaseID)
+}
+
+func (f *fakeBrokerClient) ReportActivity(_ context.Context, _ broker.GatewayIdentity, leaseID string, _ broker.Fence, ev broker.ActivityEvent) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.activity = append(f.activity, ev.Type)
+	return nil
+}
+
+func (f *fakeBrokerClient) ClaimTransfer(context.Context, broker.GatewayIdentity, string, string, string) (broker.TransferGrant, error) {
+	return broker.TransferGrant{}, broker.ErrTransferInvalid
+}
+
+func (f *fakeBrokerClient) CompleteTransfer(context.Context, broker.GatewayIdentity, string, string, int64, bool) error {
+	return nil
+}
+
+func (f *fakeBrokerClient) activityTypes() []broker.ActivityEventType {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]broker.ActivityEventType{}, f.activity...)
+}
+
+func (f *fakeBrokerClient) revokeCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.revokes)
+}
+
+// ---------------------------------------------------------------------------
+// Route isolation (D7, P9)
+// ---------------------------------------------------------------------------
+
+// testSessionHandler builds the production session-listener handler on a
+// fake broker — the same RequestID+controlHostHealth+Gateway stack wire()
+// builds.
+func testSessionHandler(t *testing.T, bc gateway.BrokerClient) (*Backend, http.Handler) {
+	t.Helper()
+	b := &Backend{log: testLog()}
+	b.ready.Store(true)
+	cfg := Config{
+		SessionDomain:       "session.test",
+		SessionControlHosts: "session.test",
+		RenewInterval:       25 * time.Millisecond,
+		RevokeDeadline:      150 * time.Millisecond,
+		ControlToken:        "control-test-token",
+	}
+	if err := b.newGateway(cfg, bc, broker.GatewayIdentity{ID: "gw-test", Audience: "session.test"}, nil, nil, nil); err != nil {
+		t.Fatalf("newGateway: %v", err)
+	}
+	t.Cleanup(func() { b.gw.Close() })
+	return b, b.sessionHandler
+}
+
+// TestRouteIsolation_SessionListener (D7/P9): API paths on the session
+// listener never reach the API mux and answer 401 or 404 — the session
+// listener's catch-all is the cookie-gated desktop proxy.
+func TestRouteIsolation_SessionListener(t *testing.T) {
+	fb := newFakeBrokerClient(t)
+	b, h := testSessionHandler(t, fb)
+
+	// The app handler exists on the same backend; count its hits.
+	appHits := &countingHandler{next: http.NotFoundHandler()}
+	b.appHandler = appHits
+
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+
+	for _, path := range []string{
+		"/v1/workspaces", "/v1/templates", "/v1/data",
+		"/v1/login", "/v1/auth/callback",
+		"/v1/me", "/v1/session", "/v1/workspaces/ws_abc12345/connection",
+	} {
+		req, err := http.NewRequest(http.MethodGet, srv.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Host = "ws-0000000a.session.test" // a workspace host: API paths 401 behind the cookie gate
+		resp, err := srv.Client().Transport.(*http.Transport).RoundTrip(req)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("GET %s on session listener = %d, want 401 or 404", path, resp.StatusCode)
+		}
+	}
+	if appHits.hits != 0 {
+		t.Fatalf("session listener reached the app mux %d times", appHits.hits)
+	}
+}
+
+// fakeConnIssuer satisfies api.ConnectionIssuer for route-table tests.
+type fakeConnIssuer struct{}
+
+func (fakeConnIssuer) IssueTicket(context.Context, api.Principal, string, bool, provisioning.SessionPolicy, string) (api.IssuedTicket, *api.Error) {
+	return api.IssuedTicket{}, &api.Error{Code: api.CodeNotFound, Message: "no ticket in tests"}
+}
+
+// fakeConnStater satisfies api.ConnectionStater for route-table tests.
+type fakeConnStater struct{}
+
+func (fakeConnStater) ConnectionState(context.Context, string, string) (api.ConnectionStatus, *api.Error) {
+	return api.ConnectionStatus{State: "none"}, nil
+}
+
+// fakeWorkspaceGetter satisfies the ownership-check surface of the
+// connection-status handler for route-table tests.
+type fakeWorkspaceGetter struct{}
+
+func (fakeWorkspaceGetter) GetWorkspace(context.Context, string, string, string) (provisioning.WorkspaceRecord, error) {
+	return provisioning.WorkspaceRecord{}, provisioning.ErrWorkspaceNotFound
+}
+
+// fakeQuotaSource satisfies api.QuotaSource for route-table tests.
+type fakeQuotaSource struct{}
+
+func (fakeQuotaSource) Report(context.Context, string) (store.QuotaReport, error) {
+	return store.QuotaReport{}, nil
+}
+
+// testAppHandler builds the production app-listener handler (mux +
+// middleware) with the real OIDC discovery path against the fake issuer.
+func testAppHandler(t *testing.T) http.Handler {
+	t.Helper()
+	return testAppHandlerWithMetrics(t, nil)
+}
+
+// testAppHandlerWithMetrics is testAppHandler with a metric set on the
+// Backend, so the E8 app-listener instrumentation is exercised.
+func testAppHandlerWithMetrics(t *testing.T, m *observability.Metrics) http.Handler {
+	t.Helper()
+	iss, err := oidctest.NewIssuer()
+	if err != nil {
+		t.Fatalf("oidctest issuer: %v", err)
+	}
+	sealer, err := loginstate.NewSealer(make([]byte, 32))
+	if err != nil {
+		t.Fatalf("loginstate sealer: %v", err)
+	}
+	authn, err := api.NewAuthenticator(context.Background(), api.AuthConfig{
+		Issuer:      iss.URL(),
+		ClientID:    "tinycdi",
+		RedirectURL: "https://portal.example.test/auth/callback",
+		LoginSealer: sealer,
+	}, api.NewInMemorySessionStore(time.Minute), testLog())
+	if err != nil {
+		t.Fatalf("NewAuthenticator: %v", err)
+	}
+	tenants := api.StaticTenantResolver{}
+	sdom, err := sessionhost.ParseDomain("session.example.test")
+	if err != nil {
+		t.Fatalf("sessionhost.ParseDomain: %v", err)
+	}
+	ws := api.NewWorkspaceHandler(nil, nil, tenants)
+	tpl := api.NewTemplateHandler(nil, tenants)
+	conn := api.NewConnectionHandler(fakeConnIssuer{}, tenants, sdom)
+	me := api.NewMeHandler(sdom.String())
+	connStatus := api.NewConnectionStatusHandler(fakeConnStater{}, fakeWorkspaceGetter{}, tenants)
+	data := api.NewDataHandler(nil, nil, tenants)
+	quota := api.NewQuotaHandler(fakeQuotaSource{}, tenants)
+	pass := func(h http.Handler) http.Handler { return h }
+	mux := appMux(authn, appRoutes{ws: ws, tpl: tpl, conn: conn, me: me, connStatus: connStatus, data: data, quota: quota}, pass, pass, pass)
+	b := &Backend{log: testLog(), metrics: m}
+	b.ready.Store(true)
+	return b.wrapApp(authn, mux, []string{"https://portal.example.test"})
+}
+
+// TestRouteIsolation_AppListener (D7): the session surface — launch,
+// control, desktop proxy — must not exist on the app listener.
+func TestRouteIsolation_AppListener(t *testing.T) {
+	srv := httptest.NewServer(testAppHandler(t))
+	t.Cleanup(srv.Close)
+
+	for _, tc := range []struct {
+		method, path string
+	}{
+		{http.MethodPost, "/v1/launch"},
+		{http.MethodGet, "/v1/control/session"},
+		{http.MethodGet, "/websockify"},
+	} {
+		req, err := http.NewRequest(tc.method, srv.URL+tc.path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := srv.Client().Transport.(*http.Transport).RoundTrip(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", tc.method, tc.path, err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("%s %s on app listener = %d, want 404", tc.method, tc.path, resp.StatusCode)
+		}
+	}
+}
+
+// TestAppListener_SessionProbe (FX-R13b): the production route table serves
+// the anonymous probe as 200 {"authenticated":false} while /v1/me stays 401.
+func TestAppListener_SessionProbe(t *testing.T) {
+	srv := httptest.NewServer(testAppHandler(t))
+	t.Cleanup(srv.Close)
+
+	get := func(path string) (*http.Response, string) {
+		resp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return resp, strings.TrimSpace(string(body))
+	}
+	resp, body := get("/v1/session")
+	if resp.StatusCode != http.StatusOK || body != `{"authenticated":false}` {
+		t.Fatalf("GET /v1/session = %d %q, want 200 {\"authenticated\":false}", resp.StatusCode, body)
+	}
+	if resp, _ = get("/v1/me"); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("GET /v1/me anonymous = %d, want 401", resp.StatusCode)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Internal listener isolation
+// ---------------------------------------------------------------------------
+
+// fakeInternalBroker is an httpapi.BrokerAPI that records calls; redeem is
+// scripted so a real redeem round-trip can be told apart from a 404.
+type fakeInternalBroker struct {
+	redeemLease broker.Lease
+	redeemErr   error
+}
+
+func (f *fakeInternalBroker) RedeemTicket(context.Context, broker.GatewayIdentity, string) (broker.Lease, error) {
+	return f.redeemLease, f.redeemErr
+}
+func (f *fakeInternalBroker) RenewLease(context.Context, broker.GatewayIdentity, string, broker.Fence) (broker.Lease, error) {
+	return broker.Lease{}, broker.ErrLeaseInvalid
+}
+func (f *fakeInternalBroker) ResolveTarget(context.Context, broker.GatewayIdentity, string) (broker.Target, error) {
+	return broker.Target{}, broker.ErrLeaseInvalid
+}
+func (f *fakeInternalBroker) RevokeLease(context.Context, string) error { return nil }
+func (f *fakeInternalBroker) RevokeLeaseChanged(context.Context, string) (bool, error) {
+	return false, nil
+}
+func (f *fakeInternalBroker) ReportActivity(context.Context, broker.GatewayIdentity, string, broker.Fence, broker.ActivityEvent) error {
+	return nil
+}
+func (f *fakeInternalBroker) RevokeWorkspaceLeases(context.Context, broker.PlatformID, uint64) (int, error) {
+	return 0, nil
+}
+func (f *fakeInternalBroker) DrainStatus(context.Context, broker.PlatformID) (int, bool, error) {
+	return 0, true, nil
+}
+func (f *fakeInternalBroker) ClaimTransfer(context.Context, broker.GatewayIdentity, string, string, string) (broker.TransferGrant, error) {
+	return broker.TransferGrant{}, broker.ErrTransferInvalid
+}
+func (f *fakeInternalBroker) CompleteTransfer(context.Context, broker.GatewayIdentity, string, string, int64, bool) error {
+	return nil
+}
+
+// testCA is a tiny in-test CA used to sign client certs for the internal
+// listener (the server cert stays self-signed; the client verifies nothing).
+type testCA struct {
+	cert *x509.Certificate
+	key  *ecdsa.PrivateKey
+	pem  []byte
+}
+
+func newTestCA(t *testing.T) *testCA { return newTestCANamed(t, "test-ca") }
+
+// newTestCANamed builds a test CA with the given Subject CN. Revocation
+// (issuer, serial) pairing tests need distinct issuer DNs.
+func newTestCANamed(t *testing.T, cn string) *testCA {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: cn},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &testCA{cert: cert, key: key,
+		pem: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})}
+}
+
+// sign issues a client certificate under the CA.
+func (ca *testCA) sign(t *testing.T, cn string) tls.Certificate {
+	return ca.signSerial(t, cn, 2)
+}
+
+// signSerial issues a client certificate under the CA with the given
+// serial number — revocation tests need known serials.
+func (ca *testCA) signSerial(t *testing.T, cn string, serial int64) tls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tpl := &x509.Certificate{
+		SerialNumber: big.NewInt(serial),
+		Subject:      pkix.Name{CommonName: cn},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tpl, ca.cert, &key.PublicKey, ca.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := tls.X509KeyPair(
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cert
+}
+
+// serveInternal binds the production internal-listener stack (server
+// constructor + httpapi handler + VerifyClientCertIfGiven TLS) on :0.
+func serveInternal(t *testing.T, h http.Handler, caPEM []byte) *httptest.Server {
+	t.Helper()
+	dir := t.TempDir()
+	cf, kf := writeTestCert(t, dir, "internal.test")
+	cert, err := tls.LoadX509KeyPair(cf, kf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsCfg, err := httpapi.ServerTLSConfig(cert, caPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := internalServer("127.0.0.1:0", h)
+	go func() { _ = serveTLS(srv, ln, tlsCfg) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return &httptest.Server{URL: "https://" + ln.Addr().String()}
+}
+
+// TestRouteIsolation_InternalListener (D7): the internal mTLS listener
+// serves only /internal/v1/*; a verified client gets 404 for API paths and
+// a request without a client certificate gets 401.
+func TestRouteIsolation_InternalListener(t *testing.T) {
+	ca := newTestCA(t)
+	fake := &fakeInternalBroker{redeemErr: broker.ErrTicketInvalid}
+	h := httpapi.NewHandler(httpapi.Config{
+		Broker:     fake,
+		Audience:   "session.test",
+		GatewayCNs: []string{"gw-test"},
+		Logger:     testLog(),
+	})
+	srv := serveInternal(t, h, ca.pem)
+
+	// A verified client cert reaches the mux: API paths 404, the real
+	// internal route exists (400 on the missing ticket body proves it).
+	clientCert := ca.sign(t, "gw-test")
+	client := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true, // test only: server cert is self-signed
+			Certificates:       []tls.Certificate{clientCert},
+		},
+	}}
+	for _, path := range []string{"/v1/workspaces", "/v1/login", "/websockify"} {
+		resp, err := client.Get(srv.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("GET %s on internal listener = %d, want 404", path, resp.StatusCode)
+		}
+	}
+	resp, err := client.Post(srv.URL+"/internal/v1/broker/redeem",
+		"application/json", strings.NewReader(`{"ticket":""}`))
+	if err != nil {
+		t.Fatalf("redeem: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		t.Fatal("internal route /internal/v1/broker/redeem missing (404)")
+	}
+
+	// No client certificate at all: the TLS layer lets the request through
+	// (VerifyClientCertIfGiven) and the handler answers 401.
+	anon := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // test only
+	}}
+	resp, err = anon.Get(srv.URL + "/internal/v1/broker/redeem")
+	if err != nil {
+		t.Fatalf("anon request: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("no client cert = %d, want 401", resp.StatusCode)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Drain-ordered shutdown
+// ---------------------------------------------------------------------------
+
+// internalAPITLS serves the internal API over TLS on a random port. The
+// server requests (but does not verify) a client certificate so the
+// handler's identity middleware sees the peer cert — the real listener's
+// ClientCAs verification is covered by TestRouteIsolation_InternalListener.
+// It returns the URL plus the CA-file bytes the broker client needs.
+func internalAPITLS(t *testing.T, h http.Handler) (url string, caPEM []byte) {
+	t.Helper()
+	srv := httptest.NewUnstartedServer(h)
+	srv.TLS = &tls.Config{ClientAuth: tls.RequestClientCert}
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	caPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
+	return srv.URL, caPEM
+}
+
+// writeFile writes content to dir/name and returns the path.
+func writeFile(t *testing.T, dir, name string, content []byte) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// drainTab is the stream-owner tab id the drain tests launch and stream
+// under.
+const drainTab = "efefefefefefefefefefefefefefefef"
+
+// TestRun_DrainsOnShutdown: cancelling the run context with a WebSocket
+// open on the session listener drains it — the socket closes, the broker
+// recorded a disconnect, no lease was revoked, and Run returns nil well
+// inside the shutdown budget.
+func TestRun_DrainsOnShutdown(t *testing.T) {
+	dir := t.TempDir()
+
+	// Fake remote broker behind the internal mTLS API contract.
+	fb := newFakeBrokerClient(t)
+	fb.scriptTicket("tk-1", "ws_aaaa0001")
+	internalH := httpapi.NewHandler(httpapi.Config{
+		Broker:     internalAdapter{fb},
+		Audience:   "session.test",
+		GatewayCNs: []string{"gw-split"},
+		Logger:     testLog(),
+	})
+	brokerURL, brokerCAPEM := internalAPITLS(t, internalH)
+
+	sessionCert, sessionKey := writeTestCert(t, dir, "session.test")
+	mtlsCert, mtlsKey := writeTestCert(t, dir, "gw-split")
+	brokerCA := writeFile(t, dir, "broker.ca", brokerCAPEM)
+
+	cfg, err := ParseFlags([]string{
+		"-listen=", "-internal-listen=",
+		"-session-listen", "127.0.0.1:0",
+		"-session-tls-cert", sessionCert,
+		"-session-tls-key", sessionKey,
+		"-session-control-hosts", "session.test",
+		"-session-domain", "session.test",
+		"-control-token-file", writeFile(t, dir, "control.token", []byte(testControlToken)),
+		"-renew-interval", "25ms",
+		"-revoke-deadline", "2s",
+		// The drain window is held for its full length now — keep this
+		// test about the shed mechanics, not the hold or the propagation
+		// wait.
+		"-drain-window", "250ms",
+		"-drain-propagation-delay", "0",
+		"-broker-url", brokerURL,
+		"-broker-ca", brokerCA,
+		"-mtls-cert", mtlsCert,
+		"-mtls-key", mtlsKey,
+		"-gateway-id", "gw-test",
+	}, noEnv)
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+
+	b, err := New(context.Background(), cfg, testLog())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	runCtx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- b.Run(runCtx) }()
+
+	_, sessionAddr, _, _ := b.Addrs()
+	if sessionAddr == "" {
+		t.Fatal("session listener not bound")
+	}
+	base := "https://" + sessionAddr
+	insecure := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // test only
+	}}
+
+	// Launch: redeem the scripted ticket for a session cookie.
+	form := url.Values{"ticket": {"tk-1"}}
+	req, err := http.NewRequest(http.MethodPost, base+"/v1/launch?tcdi_tab="+drainTab, strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "ws-aaaa0001.session.test"
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "https://ws-aaaa0001.session.test")
+	resp, err := insecure.Transport.(*http.Transport).RoundTrip(req)
+	if err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	var cookie string
+	for _, c := range resp.Cookies() {
+		if c.Name == gateway.SessionCookieName {
+			cookie = c.Value
+		}
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther || cookie == "" {
+		t.Fatalf("launch = %d, cookie set=%v — want 303 + session cookie", resp.StatusCode, cookie != "")
+	}
+
+	// Open the desktop WebSocket on the session listener.
+	wsReq, err := http.NewRequest(http.MethodGet, base+"/?tcdi_tab="+drainTab, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wsReq.Host = "ws-aaaa0001.session.test"
+	wsReq.Header.Set("Origin", "https://ws-aaaa0001.session.test")
+	wsReq.Header.Set("Cookie", gateway.SessionCookieName+"="+cookie)
+	wsReq.Header.Set("Connection", "upgrade")
+	wsReq.Header.Set("Upgrade", "websocket")
+	wsReq.Header.Set("Sec-WebSocket-Version", "13")
+	wsReq.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	wsResp, err := insecure.Transport.(*http.Transport).RoundTrip(wsReq)
+	if err != nil {
+		t.Fatalf("upgrade: %v", err)
+	}
+	if wsResp.StatusCode != http.StatusSwitchingProtocols {
+		body, _ := io.ReadAll(wsResp.Body)
+		wsResp.Body.Close()
+		t.Fatalf("upgrade = %d, want 101 (%s)", wsResp.StatusCode, body)
+	}
+
+	// Cancel the run context: Run must drain, shut down and return.
+	cancel()
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run = %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return within 10s of ctx cancel")
+	}
+
+	// The open socket must be dead now.
+	_ = wsResp.Body.Close()
+	if _, err := wsResp.Body.Read(make([]byte, 1)); err == nil {
+		// Some transports report the close on the second read; don't fail
+		// on the first — the disconnect record below is the real check.
+		t.Log("first post-drain read did not error; relying on disconnect record")
+	}
+
+	// The broker must have seen a disconnect for the lease and no revoke.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		acts := fb.activityTypes()
+		seen := false
+		for _, a := range acts {
+			if a == broker.ActivityDisconnect {
+				seen = true
+			}
+		}
+		if seen {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no disconnect recorded; activity=%v revokes=%v", acts, fb.revokeCount())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := fb.revokeCount(); n != 0 {
+		t.Fatalf("drain revoked %d leases, want 0 (the cookie must survive a restart)", n)
+	}
+}
+
+// TestRun_DrainPropagationWait (FX-R34): on shutdown the gateway drain
+// waits for the propagation delay BEFORE closing streams — readiness
+// fails at once, but an open stream is untouched, a new upgrade is still
+// served, and the broker sees no disconnect until the delay ends; only
+// then does the 1001 close land and the drain window run its course.
+// The whole sequence stays far inside the shared shutdown deadline.
+func TestRun_DrainPropagationWait(t *testing.T) {
+	const (
+		propDelay = 1500 * time.Millisecond
+		window    = 400 * time.Millisecond
+	)
+	dir := t.TempDir()
+
+	fb := newFakeBrokerClient(t)
+	fb.scriptTicket("tk-1", "ws_aaaa0001")
+	// The mid-wait upgrade must go to a second workspace — a lease for
+	// the same one would fence the first stream.
+	fb.scriptTicket("tk-2", "ws_bbbb0002")
+	internalH := httpapi.NewHandler(httpapi.Config{
+		Broker:     internalAdapter{fb},
+		Audience:   "session.test",
+		GatewayCNs: []string{"gw-split"},
+		Logger:     testLog(),
+	})
+	brokerURL, brokerCAPEM := internalAPITLS(t, internalH)
+
+	sessionCert, sessionKey := writeTestCert(t, dir, "session.test")
+	mtlsCert, mtlsKey := writeTestCert(t, dir, "gw-split")
+	brokerCA := writeFile(t, dir, "broker.ca", brokerCAPEM)
+
+	cfg, err := ParseFlags([]string{
+		"-listen=", "-internal-listen=",
+		"-session-listen", "127.0.0.1:0",
+		"-session-tls-cert", sessionCert,
+		"-session-tls-key", sessionKey,
+		"-session-control-hosts", "session.test",
+		"-session-domain", "session.test",
+		"-control-token-file", writeFile(t, dir, "control.token", []byte(testControlToken)),
+		"-renew-interval", "25ms",
+		"-revoke-deadline", "2s",
+		"-drain-window", window.String(),
+		"-drain-propagation-delay", propDelay.String(),
+		"-broker-url", brokerURL,
+		"-broker-ca", brokerCA,
+		"-mtls-cert", mtlsCert,
+		"-mtls-key", mtlsKey,
+		"-gateway-id", "gw-test",
+	}, noEnv)
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+
+	b, err := New(context.Background(), cfg, testLog())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	runCtx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- b.Run(runCtx) }()
+
+	_, sessionAddr, _, _ := b.Addrs()
+	if sessionAddr == "" {
+		t.Fatal("session listener not bound")
+	}
+	base := "https://" + sessionAddr
+	insecure := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // test only
+	}}
+
+	upgrade := func(ticket, wsHost string) *http.Response {
+		form := url.Values{"ticket": {ticket}}
+		req, err := http.NewRequest(http.MethodPost, base+"/v1/launch?tcdi_tab="+drainTab, strings.NewReader(form.Encode()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Host = wsHost
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Origin", "https://"+wsHost)
+		resp, err := insecure.Transport.(*http.Transport).RoundTrip(req)
+		if err != nil {
+			t.Fatalf("launch %s: %v", ticket, err)
+		}
+		var cookie string
+		for _, c := range resp.Cookies() {
+			if c.Name == gateway.SessionCookieName {
+				cookie = c.Value
+			}
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusSeeOther || cookie == "" {
+			t.Fatalf("launch %s = %d, cookie set=%v — want 303 + session cookie", ticket, resp.StatusCode, cookie != "")
+		}
+		wsReq, err := http.NewRequest(http.MethodGet, base+"/?tcdi_tab="+drainTab, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wsReq.Host = wsHost
+		wsReq.Header.Set("Origin", "https://"+wsHost)
+		wsReq.Header.Set("Cookie", gateway.SessionCookieName+"="+cookie)
+		wsReq.Header.Set("Connection", "upgrade")
+		wsReq.Header.Set("Upgrade", "websocket")
+		wsReq.Header.Set("Sec-WebSocket-Version", "13")
+		wsReq.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+		wsResp, err := insecure.Transport.(*http.Transport).RoundTrip(wsReq)
+		if err != nil {
+			t.Fatalf("upgrade %s: %v", ticket, err)
+		}
+		if wsResp.StatusCode != http.StatusSwitchingProtocols {
+			body, _ := io.ReadAll(wsResp.Body)
+			wsResp.Body.Close()
+			t.Fatalf("upgrade %s = %d, want 101 (%s)", ticket, wsResp.StatusCode, body)
+		}
+		return wsResp
+	}
+
+	disconnectSeen := func() bool {
+		for _, a := range fb.activityTypes() {
+			if a == broker.ActivityDisconnect {
+				return true
+			}
+		}
+		return false
+	}
+
+	ws1 := upgrade("tk-1", "ws-aaaa0001.session.test")
+	// The read blocks while the conn is healthy: if it returns before
+	// the propagation delay ends, the stream was closed too early.
+	streamClosed := make(chan struct{})
+	go func() {
+		_, _ = ws1.Body.Read(make([]byte, 16))
+		close(streamClosed)
+	}()
+
+	start := time.Now()
+	cancel()
+
+	// Readiness fails at once even though streams still flow — the drop
+	// must land inside the wait, well before the drain begins.
+	waitFor(t, propDelay, "readiness to drop inside the propagation wait", func() bool {
+		resp, err := controlHostGet(insecure, base, "/readyz")
+		if err != nil {
+			return false
+		}
+		resp.Body.Close()
+		return resp.StatusCode == http.StatusServiceUnavailable
+	})
+
+	// A new upgrade during the wait is still served — refusing it would
+	// waste the client's one in-frame retry on a 503.
+	ws2 := upgrade("tk-2", "ws-bbbb0002.session.test")
+	defer ws2.Body.Close()
+	if d := time.Since(start); d >= propDelay {
+		t.Fatalf("mid-wait upgrade probe ran %v after cancel, past the %v propagation delay", d, propDelay)
+	}
+
+	// At ~2/3 of the delay the first stream must still be open and the
+	// broker must not have seen a disconnect.
+	time.Sleep(2 * propDelay / 3)
+	select {
+	case <-streamClosed:
+		t.Fatal("stream closed during the propagation wait")
+	default:
+	}
+	if disconnectSeen() {
+		t.Fatal("disconnect recorded during the propagation wait — streams must close only after it")
+	}
+
+	// After the delay: the drain's close lands and the disconnect is
+	// reported — still inside the propagation wait + window, far under
+	// the shutdown deadline.
+	waitFor(t, propDelay+3*time.Second, "disconnect after the propagation wait", disconnectSeen)
+	if d := time.Since(start); d < propDelay {
+		t.Fatalf("disconnect reported %v after cancel, before the %v propagation delay ended", d, propDelay)
+	}
+
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run = %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return within 10s of ctx cancel")
+	}
+	if d := time.Since(start); d < propDelay+window {
+		t.Fatalf("Run returned %v after cancel, before propagation delay + drain window (%v)", d, propDelay+window)
+	}
+	_ = ws1.Body.Close()
+	if n := fb.revokeCount(); n != 0 {
+		t.Fatalf("drain revoked %d leases, want 0", n)
+	}
+}
+
+// TestRun_HoldsDrainWindow: the drain window is a duration, not a shed
+// budget — after ctx cancel the session listener keeps answering for the
+// whole -drain-window (readiness already failed, sockets still land) and
+// Run only returns once the window ends.
+func TestRun_HoldsDrainWindow(t *testing.T) {
+	const window = 600 * time.Millisecond
+	dir := t.TempDir()
+
+	fb := newFakeBrokerClient(t)
+	internalH := httpapi.NewHandler(httpapi.Config{
+		Broker:     internalAdapter{fb},
+		Audience:   "session.test",
+		GatewayCNs: []string{"gw-split"},
+		Logger:     testLog(),
+	})
+	brokerURL, brokerCAPEM := internalAPITLS(t, internalH)
+
+	sessionCert, sessionKey := writeTestCert(t, dir, "session.test")
+	mtlsCert, mtlsKey := writeTestCert(t, dir, "gw-split")
+	brokerCA := writeFile(t, dir, "broker.ca", brokerCAPEM)
+
+	cfg, err := ParseFlags([]string{
+		"-listen=", "-internal-listen=",
+		"-session-listen", "127.0.0.1:0",
+		"-session-tls-cert", sessionCert,
+		"-session-tls-key", sessionKey,
+		"-session-control-hosts", "session.test",
+		"-session-domain", "session.test",
+		"-control-token-file", writeFile(t, dir, "control.token", []byte(testControlToken)),
+		"-drain-window", window.String(),
+		// Keep the test about the window hold; the propagation wait has
+		// its own test.
+		"-drain-propagation-delay", "0",
+		"-broker-url", brokerURL,
+		"-broker-ca", brokerCA,
+		"-mtls-cert", mtlsCert,
+		"-mtls-key", mtlsKey,
+		"-gateway-id", "gw-test",
+	}, noEnv)
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	b, err := New(context.Background(), cfg, testLog())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	runCtx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- b.Run(runCtx) }()
+
+	_, sessionAddr, _, _ := b.Addrs()
+	base := "https://" + sessionAddr
+	insecure := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // test only
+	}}
+
+	waitFor(t, 5*time.Second, "session listener serving", func() bool {
+		resp, err := controlHostGet(insecure, base, "/healthz")
+		if err != nil {
+			return false
+		}
+		resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	})
+
+	start := time.Now()
+	cancel()
+
+	// Readiness fails at once, but the socket keeps answering for the
+	// whole window — nothing is refused inside it.
+	waitFor(t, window/2, "readiness to drop inside the window", func() bool {
+		resp, err := controlHostGet(insecure, base, "/readyz")
+		if err != nil {
+			return false
+		}
+		resp.Body.Close()
+		return resp.StatusCode == http.StatusServiceUnavailable
+	})
+	select {
+	case <-runDone:
+		t.Fatalf("Run returned %v after cancel, inside the %v drain window", time.Since(start), window)
+	case <-time.After(window - 100*time.Millisecond):
+	}
+	resp, err := controlHostGet(insecure, base, "/readyz")
+	if err != nil {
+		t.Fatalf("session listener refused a connection inside the drain window: %v", err)
+	}
+	resp.Body.Close()
+
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run = %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after the drain window")
+	}
+	if d := time.Since(start); d < window {
+		t.Fatalf("Run returned %v after cancel, before the %v drain window ended", d, window)
+	}
+}
+
+// TestRun_HoldsDrainWindowAppOnly: the window hold is not a gateway
+// concern — a backend with no session listener (-session-listen unset)
+// still keeps the app listener answering for the whole -drain-window.
+func TestRun_HoldsDrainWindowAppOnly(t *testing.T) {
+	const window = 400 * time.Millisecond
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &Backend{cfg: Config{DrainWindow: window}, log: testLog()}
+	srv := &http.Server{Handler: b.readyz(http.NotFoundHandler())}
+	b.servers = append(b.servers, namedServer{name: "app", srv: srv, ln: ln})
+	b.markCacheSynced()
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- b.Run(runCtx) }()
+
+	base := "http://" + ln.Addr().String()
+	waitFor(t, 5*time.Second, "app listener serving", func() bool {
+		resp, err := http.Get(base + "/readyz")
+		if err != nil {
+			return false
+		}
+		resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	})
+
+	start := time.Now()
+	cancel()
+
+	// Inside the window the app listener still answers — readiness is
+	// already false but the socket is not refused.
+	select {
+	case <-runDone:
+		t.Fatalf("Run returned %v after cancel, inside the %v drain window", time.Since(start), window)
+	case <-time.After(window - 100*time.Millisecond):
+	}
+	resp, err := http.Get(base + "/readyz")
+	if err != nil {
+		t.Fatalf("app listener refused a connection inside the drain window: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("/readyz inside the drain window = %d, want 503", resp.StatusCode)
+	}
+
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run = %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after the drain window")
+	}
+	if d := time.Since(start); d < window {
+		t.Fatalf("Run returned %v after cancel, before the %v drain window ended", d, window)
+	}
+}
+
+// TestGatewayIDSharedAcrossInstances: two backends with the same
+// -gateway-id share lease ownership — a lease redeemed through one must be
+// renewable by the other (restart-safe sessions need replicas to be
+// interchangeable; a foreign ID still gets ErrDenied).
+func TestGatewayIDSharedAcrossInstances(t *testing.T) {
+	db := newDB(t)
+	src := newFakeBindings()
+	// Production binds the ticket audience to the session domain
+	// (resolveGatewayIdentity); the test broker does the same.
+	brk := broker.New(db, src, broker.WithGatewayAudience("session.test"))
+
+	seedWorkspace(t, db, "tenant-a", "iss|alice", "ws-shared-1")
+	src.set(readyBinding("ws-shared-1", "tenant-a", "iss|alice", 1, "rt-1", time.Now()))
+
+	cfg, err := ParseFlags(withArg(
+		withArg(mergedArgs(), "-session-domain", "session.test"),
+		"-gateway-id", "gw-shared"), noEnv)
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	b1 := &Backend{cfg: cfg, log: testLog()}
+	b2 := &Backend{cfg: cfg, log: testLog()}
+	id1, err := resolveGatewayIdentity(b1.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, err := resolveGatewayIdentity(b2.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id1 != id2 {
+		t.Fatalf("identities differ across replicas: %+v vs %+v", id1, id2)
+	}
+	lgA, err := b1.localGateway(brk, id1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lgB, err := b2.localGateway(brk, id2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	portalSum := sha256.Sum256([]byte("portal-1"))
+	seedSession(t, db, hex.EncodeToString(portalSum[:]))
+	tick, err := brk.IssueTicket(ctx,
+		api.Principal{Issuer: "iss", Subject: "alice", TenantID: "tenant-a"},
+		"ws-shared-1", false, provisioning.SessionPolicy{}, "portal-1")
+	if err != nil {
+		t.Fatalf("issue ticket: %v", err)
+	}
+	lease, err := lgA.RedeemTicket(ctx, broker.GatewayIdentity{}, tick.Token)
+	if err != nil {
+		t.Fatalf("redeem on replica A: %v", err)
+	}
+	fence := broker.Fence{
+		WorkspaceUID:      lease.WorkspaceUID,
+		RuntimeGeneration: lease.RuntimeGeneration,
+		RuntimeUID:        lease.RuntimeUID,
+		FencingVersion:    lease.FencingVersion,
+	}
+	if _, err := lgB.RenewLease(ctx, broker.GatewayIdentity{}, lease.ID, fence); err != nil {
+		t.Fatalf("renew on replica B: %v — a shared -gateway-id must make replicas interchangeable", err)
+	}
+
+	// A different gateway ID remains foreign: same DB, ErrDenied.
+	cfgOther, _ := ParseFlags(withArg(
+		withArg(mergedArgs(), "-session-domain", "session.test"),
+		"-gateway-id", "gw-other"), noEnv)
+	b3 := &Backend{cfg: cfgOther, log: testLog()}
+	id3, err := resolveGatewayIdentity(b3.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lgC, err := b3.localGateway(brk, id3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lgC.RenewLease(ctx, broker.GatewayIdentity{}, lease.ID, fence); !errors.Is(err, broker.ErrDenied) {
+		t.Fatalf("renew from a different gateway id = %v, want ErrDenied", err)
+	}
+}
+
+// internalAdapter adapts the gateway-side fakeBrokerClient onto the
+// httpapi.BrokerAPI surface the internal listener exposes.
+type internalAdapter struct{ fb *fakeBrokerClient }
+
+func (a internalAdapter) RedeemTicket(ctx context.Context, gw broker.GatewayIdentity, opaque string) (broker.Lease, error) {
+	return a.fb.RedeemTicket(ctx, gw, opaque)
+}
+func (a internalAdapter) RenewLease(ctx context.Context, gw broker.GatewayIdentity, leaseID string, fence broker.Fence) (broker.Lease, error) {
+	return a.fb.RenewLease(ctx, gw, leaseID, fence)
+}
+func (a internalAdapter) ResolveTarget(ctx context.Context, gw broker.GatewayIdentity, leaseID string) (broker.Target, error) {
+	return a.fb.ResolveTarget(ctx, gw, leaseID)
+}
+func (a internalAdapter) RevokeLease(ctx context.Context, leaseID string) error {
+	return a.fb.RevokeLease(ctx, leaseID)
+}
+func (a internalAdapter) RevokeLeaseChanged(ctx context.Context, leaseID string) (bool, error) {
+	return a.fb.RevokeLeaseChanged(ctx, leaseID)
+}
+func (a internalAdapter) ReportActivity(ctx context.Context, gw broker.GatewayIdentity, leaseID string, fence broker.Fence, ev broker.ActivityEvent) error {
+	return a.fb.ReportActivity(ctx, gw, leaseID, fence, ev)
+}
+func (a internalAdapter) RevokeWorkspaceLeases(context.Context, broker.PlatformID, uint64) (int, error) {
+	return 0, nil
+}
+func (a internalAdapter) DrainStatus(context.Context, broker.PlatformID) (int, bool, error) {
+	return 0, true, nil
+}
+func (a internalAdapter) ClaimTransfer(ctx context.Context, gw broker.GatewayIdentity, leaseID, transferID, method string) (broker.TransferGrant, error) {
+	return a.fb.ClaimTransfer(ctx, gw, leaseID, transferID, method)
+}
+func (a internalAdapter) CompleteTransfer(ctx context.Context, gw broker.GatewayIdentity, leaseID, transferID string, bytesDone int64, ok bool) error {
+	return a.fb.CompleteTransfer(ctx, gw, leaseID, transferID, bytesDone, ok)
+}
+
+// TestAppListener_UnknownCookieSprayRefused (R1-03, wired stack): the
+// production app handler carries the default unknown-cookie bound (burst
+// 120): a forged-cookie spray from one client gets 401 until the budget is
+// spent, then 429 with Retry-After, never an unbounded run of store reads.
+func TestAppListener_UnknownCookieSprayRefused(t *testing.T) {
+	srv := httptest.NewServer(testAppHandler(t))
+	t.Cleanup(srv.Close)
+	// The limiter refills on the real clock (5 tokens/s at the default
+	// 300/min), so a slow run may see a few extra non-429 answers; allow
+	// refill-sized slack, never an unbounded run.
+	first429, late := -1, 0
+	for i := 0; i < 200; i++ {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/me", nil)
+		req.AddCookie(&http.Cookie{Name: "__Host-tcdi_session", Value: fmt.Sprintf("forged-%d", i)})
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatalf("GET /v1/me #%d: %v", i, err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusTooManyRequests {
+			if resp.Header.Get("Retry-After") == "" {
+				t.Fatalf("#%d: 429 without Retry-After", i)
+			}
+			if first429 < 0 {
+				first429 = i
+			}
+		} else if first429 >= 0 {
+			late++
+		}
+	}
+	if first429 < api.SessionLookupBurst || first429 > api.SessionLookupBurst+5 {
+		t.Fatalf("first 429 at request %d, want ~%d (the default burst)", first429, api.SessionLookupBurst)
+	}
+	if late > 5 {
+		t.Fatalf("%d non-429 answers after the budget was spent, want only refill-sized slack", late)
+	}
+}
+
+// TestWrapApp_PortalBrowserHeaders (R1-10): every app-listener response
+// on the portal host — an authenticated route's 401, the anonymous probe's
+// 200, and the mux's own 404 — carries nosniff, a CSP that denies framing,
+// XFO DENY and no-store.
+func TestWrapApp_PortalBrowserHeaders(t *testing.T) {
+	srv := httptest.NewServer(testAppHandler(t))
+	t.Cleanup(srv.Close)
+	for _, tc := range []struct {
+		path string
+		want int
+	}{
+		{"/v1/me", http.StatusUnauthorized},
+		{"/v1/workspaces", http.StatusUnauthorized},
+		{"/v1/session", http.StatusOK},
+		{"/v1/no-such-route", http.StatusNotFound},
+	} {
+		resp, err := http.Get(srv.URL + tc.path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", tc.path, err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != tc.want {
+			t.Fatalf("GET %s = %d, want %d", tc.path, resp.StatusCode, tc.want)
+		}
+		h := resp.Header
+		if h.Get("X-Content-Type-Options") != "nosniff" ||
+			!strings.Contains(h.Get("Content-Security-Policy"), "frame-ancestors 'none'") ||
+			h.Get("X-Frame-Options") != "DENY" ||
+			h.Get("Cache-Control") != "no-store" ||
+			h.Get("Referrer-Policy") != "no-referrer" {
+			t.Errorf("GET %s: headers nosniff=%q csp=%q xfo=%q cache=%q referrer=%q",
+				tc.path, h.Get("X-Content-Type-Options"), h.Get("Content-Security-Policy"),
+				h.Get("X-Frame-Options"), h.Get("Cache-Control"), h.Get("Referrer-Policy"))
+		}
+	}
+}

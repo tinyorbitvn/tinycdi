@@ -1,0 +1,935 @@
+# tinycdi — values
+#
+# SECURITY CONTRACT
+#   * Secrets are referenced by NAME only (existingSecret). This file must
+#     never carry passwords, tokens, DSNs or private keys.
+#   * The operator ClusterRole is bound ONLY via RoleBindings inside the
+#     release namespace and managedNamespaces — never cluster-wide.
+#   * SecureCookies cannot be disabled here: no value maps to it.
+#   * The chart never installs KubeVirt/CDI, a Postgres database, a dev
+#     OIDC provider, or any other bundled dependency — Postgres, the IdP,
+#     and TLS material are prerequisites you operate yourself.
+
+global:
+  # Registry prepended to every image.repository (all components and the
+  # seeded-template runtime images). Set e.g. registry.example.com for an
+  # internal mirror; a per-image .registry override wins over this.
+  imageRegistry: ghcr.io
+  # PulledSecrets attached to every platform pod. Entries may be plain
+  # names ("registry-pull") or {name: ...} maps.
+  imagePullSecrets: []
+
+images:
+  # tag defaults to the chart appVersion; digest wins over tag when set.
+  backend:
+    registry: ""
+    repository: tinyorbitvn/tinycdi-backend
+    tag: ""
+    digest: ""
+    pullPolicy: ""
+  operator:
+    registry: ""
+    repository: tinyorbitvn/tinycdi-operator
+    tag: ""
+    digest: ""
+    pullPolicy: ""
+  frontend:
+    registry: ""
+    repository: tinyorbitvn/tinycdi-frontend
+    tag: ""
+    digest: ""
+    pullPolicy: ""
+  # Runtime images referenced by seeded WorkspaceTemplates (templates[]
+  # entries using `image: linuxDesktop` / `image: browser`). Runtime images
+  # must be DIGEST-pinned (spec.linux.image requires <repo>@sha256:<64hex>)
+  # — a tag-only runtime image is rejected by the CRD.
+  # builtAt is the image build timestamp (RFC 3339, UTC): the second the
+  # build job recorded and stamped into the image's
+  # org.opencontainers.image.created label. A release stamps it here for
+  # linuxBase, linuxDesktop and browser; a runtime-train bump copies it
+  # from runtime-images.json. It renders as the template's
+  # workspaces.cdi.tinyorbit.vn/image-built-at annotation so the API can
+  # report imageBuiltAt/imageStale on templates and workspaces. A stale
+  # image past -image-block-after (45 d default) refuses create/start with
+  # 409 IMAGE_STALE.
+  # engines.{chromium,firefox} record the browser engine versions the image
+  # ships (same runtime-images.json fields); they render as the template's
+  # image-chromium/image-firefox annotations so the stale-image view can
+  # show both engines.
+  # linuxBase is the base layer set both runtime profiles build FROM
+  # (docs/images.md). No template references it: it is here so the release
+  # pins its digest next to the profiles', for custom desktop images built
+  # on it. It is never pulled by the chart.
+  linuxBase:
+    registry: ""
+    repository: tinyorbitvn/tinycdi-linux-base
+    tag: ""
+    digest: ""
+    pullPolicy: ""
+    builtAt: ""
+  linuxDesktop:
+    registry: ""
+    repository: tinyorbitvn/tinycdi-linux-desktop
+    tag: ""
+    digest: ""
+    pullPolicy: ""
+    builtAt: ""
+    engines: {}
+  browser:
+    registry: ""
+    repository: tinyorbitvn/tinycdi-browser
+    tag: ""
+    digest: ""
+    pullPolicy: ""
+    builtAt: ""
+    engines: {}
+
+# Kasm workspace adapter (spec.linux.adapter=kasm — docs/kasm-images.md):
+# the initContainer image that delivers the adapter scripts into pods of
+# kasm-template workspaces. OFF by default: the operator only gets
+# --kasm-adapter-image when kasmAdapter.enabled=true, even though release
+# stamping fills image.digest in the packaged chart. Enabling requires the
+# DIGEST-pinned image (image.digest) or the render fails; a seeded
+# adapter=kasm template without enabled=true fails the render too (the
+# backend would reject those workspaces). Never republish kasmweb/* images
+# — they are pulled by the nodes straight from Docker Hub.
+kasmAdapter:
+  enabled: false
+  # Images allowed to back a seeded adapter=kasm template with
+  # spec.experience=Browser (E13). Every entry must be a digest-pinned
+  # browser-class build/kasm-catalog.txt entry — the catalog binds
+  # browser-class images to the tightened ≤2-major engine-lag gate
+  # (docs/kasm-images.md); check-kasm-catalog.sh refuses any allowlist
+  # entry that is not browser-class. EMPTY today: no kasmweb browser
+  # image is within 2 majors of the native Chromium pin.
+  browserAllowlist: []
+  image:
+    registry: ""
+    repository: tinyorbitvn/tinycdi-kasm-adapter
+    tag: ""
+    digest: ""
+
+# Tenant namespaces the platform manages. The chart creates them with
+# helm.sh/resource-policy=keep (uninstall keeps them and the PVCs inside),
+# labels each with workspaces.cdi.tinyorbit.vn/tenant=<tenant>, installs the
+# default-deny NetworkPolicy baseline, a tinycdi-runtime ServiceAccount
+# (automountServiceAccountToken=false) and the per-namespace RoleBindings.
+#
+# quota (per entry) declares the tenant's limits. The backend renders them as
+# -tenant-quotas and its singleton leader upserts exactly the listed tenants'
+# tenant_quota rows at startup (idempotent; unlisted tenants and entries
+# without a quota block are left untouched). A tenant WITHOUT a quota row has
+# every create refused with 409 QUOTA_NOT_CONFIGURED, and NOTES warns about it.
+#   runningWorkspaces  whole number >= 0 (concurrently running workspaces)
+#   cpu                cores or millicores: "16", "1.5", "500m"
+#   memory, storage    Kubernetes quantities: "64Gi", "200G", 107374182400
+# Values below current usage are accepted: running workspaces keep running
+# and new creates are refused until usage drops.
+# quotaCeiling (per entry, OPTIONAL; same four keys as quota, not together
+# with quota) lets the tenant's admins set the quota themselves through the
+# admin quota API, up to these amounts. It renders as -tenant-quota-ceilings.
+# Without quota or quotaCeiling, tenant admins cannot set a quota at all and
+# every create is refused with QUOTA_NOT_CONFIGURED until an operator
+# declares one.
+# namespaceQuota (per entry, OPTIONAL) renders Kubernetes-side bounds for
+# the namespace — a ResourceQuota (total requests/limits/object counts
+# across every pod, PVC and Service the workspaces create) and/or a
+# LimitRange (defaults injected into pods that leave resources unset).
+# It complements the platform-side quota above, which counts workspaces:
+# the ResourceQuota also stops an over-sized or unbounded pod spec from
+# ever scheduling, bounding the blast radius of a workspace create that
+# slips past the API. Default OFF — no objects are rendered. Sizing the
+# ResourceQuota so it cannot cover the tenant's quota.workspaces leaves
+# new workspaces Pending/refused by the apiserver, so keep it aligned
+# with the quota block. Once requests.* quotas exist, every pod MUST
+# carry requests — runtime pods do (from the template spec); the
+# LimitRange defaults below cover anything else.
+managedNamespaces: []
+  # - name: tinycdi-tenant-a
+  #   tenant: tenant-a
+  #   quota: {runningWorkspaces: 12, cpu: "16", memory: 64Gi, storage: 200Gi}
+  #   # or, to delegate the quota to tenant admins:
+  #   # quotaCeiling: {runningWorkspaces: 20, cpu: "32", memory: 128Gi, storage: 400Gi}
+  #   namespaceQuota:
+  #     resourceQuota:
+  #       hard:                         # ~12 desktops at 2CPU/4Gi request each
+  #         requests.cpu: "24"
+  #         requests.memory: 48Gi
+  #         limits.cpu: "96"
+  #         limits.memory: 192Gi
+  #         requests.storage: 240Gi
+  #         persistentvolumeclaims: "24"
+  #         pods: "30"
+  #         services: "30"
+  #     limitRange:
+  #       limits:
+  #         - type: Container
+  #           defaultRequest: {cpu: "1", memory: 2Gi}
+  #           default: {cpu: "4", memory: 8Gi}
+
+# Public entry points. Every workspace session is served on its own
+# <label>.<sessionDomain> host (D9): the edge carries ONE wildcard route
+# for *.<sessionDomain> and needs a wildcard DNS record plus a wildcard
+# TLS certificate (HTTP-01 cannot issue wildcards — use DNS-01).
+# portalHost must differ from sessionDomain and must NOT sit inside it —
+# the wildcard route would capture portal traffic (portal cookies, the
+# OIDC redirect and launch URLs are origin-scoped).
+portalHost: portal.example.invalid
+sessionDomain: session.example.invalid
+
+oidc:
+  issuer: https://idp.example.invalid/realms/tinycdi
+  clientID: tinycdi
+  # Existing Secret (in the release namespace) with the client secret.
+  existingSecret: tinycdi-oidc-client
+  # Key inside that Secret holding the client secret value.
+  clientSecretKey: client-secret
+  # Defaults to https://<portalHost>/v1/auth/callback when empty.
+  redirectURL: ""
+  # Login gate: when non-empty, the backend only lets users in whose ID-token
+  # `groups` claim carries at least one of these names — exact match (the
+  # Keycloak full-path form "/platform-admins" does NOT satisfy
+  # "platform-admins"). Rendered as --required-groups=<csv>. Empty keeps
+  # login open to every IdP account — tighten this in production.
+  requiredGroups: []
+  # Tenant-admin role: ID-token `groups` claim values that grant tenant
+  # administration — exact match, same semantics as requiredGroups (a
+  # Keycloak full path "/x" does NOT match "x"). Rendered as
+  # --tenant-admin-groups=<csv>; must name at least one group.
+  # SECURITY: every member of a listed group gets tenant-wide read,
+  # stop/start/purge of any workspace or retained disk, and admin of the
+  # tenant's quota and per-user limits — keep this list small and review
+  # the corresponding IdP group membership.
+  tenantAdminGroups: ["tenant-admin"]
+  # Sign-out also ends the identity provider session (RP-initiated logout)
+  # when the provider's discovery document has end_session_endpoint. Without
+  # it the provider session survives and the next visit signs the user
+  # straight back in. false keeps sign-out local to the portal.
+  # Rendered as --oidc-end-session=<bool>.
+  endSession: true
+  # Where the provider sends the browser after it ended its session
+  # (post_logout_redirect_uri), e.g. https://<portalHost>/signed-out. The URI
+  # must be registered at the provider (Keycloak: client "Valid post logout
+  # redirect URIs"), so it is empty by default; the provider then shows its
+  # own logged-out page. https only. Rendered as
+  # --oidc-post-logout-redirect=<url> when set.
+  postLogoutRedirect: ""
+  # backend -> IdP egress. Narrow to the IdP address space when known.
+  egressCIDRs: ["0.0.0.0/0"]
+  port: 443
+
+database:
+  # Existing Secret (in the release namespace) with the PostgreSQL DSN
+  # (postgres://user:pass@host:port/db?...). The backend runs embedded
+  # migrations at startup, so the role needs DDL rights on its schema.
+  existingSecret: tinycdi-backend-db
+  urlKey: url
+  port: 5432
+  # NetworkPolicy peers the backend may reach on database.port, e.g.
+  #   - ipBlock: {cidr: 10.20.30.40/32}
+  # or namespaceSelector/podSelector peers. REQUIRED for backend->DB egress:
+  # an EMPTY list fails the render (an empty peer list means "everywhere")
+  # and so does leaving the shipped placeholder below — it matches only
+  # the unroutable 0.0.0.0 host, which silently cuts the backend from its
+  # database (CHTR-7). Always set this to your database.
+  allowedPeers:
+    - ipBlock: {cidr: 0.0.0.0/32}   # deny-all placeholder — REPLACE or the render fails
+  # PostgreSQL TLS. The backend REFUSES to start on a non-verifying sslmode
+  # (disable/allow/prefer/require) — CHTR-8 — so the chart defaults to
+  # verify-full and refuses weaker modes unless dev.enabled (which also
+  # renders --dev-insecure-db on the backend). mode is exported as PGSSLMODE
+  # and caSecret is mounted read-only as PGSSLROOTCERT — pgx honours both
+  # libpq-style env vars for DSN keys the URL omits (an explicit sslmode=
+  # in the DSN still wins, and a non-verifying one makes the backend fail
+  # fast). caSecret is OPTIONAL: without it pgx verifies against the
+  # system CA pool — only needed for private-CA databases.
+  tls:
+    mode: verify-full
+    caSecret:
+      name: ""            # e.g. tinycdi-db-ca — needed for private-CA DBs
+      key: ca.crt
+
+# Backend (cmd/backend): the public API and the session gateway in ONE
+# Deployment — one TLS listener per role (app :8443 for portalHost /v1,
+# session :8444 for every <label>.<sessionDomain> host, internal mTLS
+# :9443 for the operator)
+# plus an optional metrics listener on its own ClusterIP Service.
+backend:
+  # D22: two replicas with rollingUpdate maxUnavailable=0 and a PDB —
+  # sessions survive a rolling restart and a single pod loss.
+  replicas: 2
+  # ONE gateway identity for the whole Deployment (D19/D22): the lease
+  # directory is shared across replicas — never a per-pod name.
+  gatewayID: tinycdi-backend
+  sessionIdle: 30m
+  # Pre-stop drain order (FX-R34): on SIGTERM /readyz fails at once, then
+  # the backend waits drainPropagationDelay for the pod's endpoint
+  # removal to reach kube-proxy / the ingress — streams keep flowing and
+  # new upgrades are still served — before the graceful 1001 close
+  # tells clients to reconnect (their retry then lands on a sibling
+  # replica, not back here). The drain window (-drain-window) then holds
+  # the listeners for late reads while launches/upgrades get a retryable
+  # 503. Budget (checked at render time): drainPropagationDelay +
+  # drainWindow must be <= 20s, leaving >= 4 s of the 24 s shutdown
+  # deadline for listener shutdown; the deadline sits under the 30 s
+  # terminationGracePeriodSeconds. Go duration format (e.g. 5s, 1500ms,
+  # 1m30s, 0).
+  drainPropagationDelay: 5s
+  drainWindow: 8s
+  # Session-cookie mode: "lax" (portal and session domain on the same
+  # registrable domain) or "partitioned" (SameSite=None;Secure;Partitioned
+  # — for cross-site deployments).
+  sessionCookieMode: lax
+  # Per-workspace bound on live upstream connections through ONE backend
+  # replica (-session-stream-cap): websocket streams and plain proxied
+  # requests alike — each holds an upstream conn the KasmVNC runtime
+  # spends ~3 fds on, and Xvnc crashes once its fd count crosses
+  # FD_SETSIZE (~330 conns on a clean pod). 32 stays an order of
+  # magnitude under that while real use is one stream plus asset
+  # fetches; over the cap the session origin answers a retryable
+  # 429 too_many_streams. Per-replica: N replicas admit N x cap.
+  # Minimum 1 — the bound cannot be disabled (a runtime without the
+  # fd bound tolerates any large value).
+  sessionStreamCap: 32
+  # AEAD keys sealing the __Host-tcdi_login cookie (D20 — a login started
+  # on one replica completes on another). REQUIRED — set existingSecret to
+  # a Secret with keys "current" (and optional "previous" during
+  # rotation), 32 bytes each, or set generate: true and the chart creates
+  # <release>-backend-login-keys once via lookup (kept across upgrades;
+  # not for GitOps — helm template cannot see the cluster).
+  loginKeys:
+    existingSecret: ""
+    generate: false
+  # One certificate per listener — the listeners never share TLS material.
+  tls:
+    app:      {existingSecret: tinycdi-backend-app-tls}      # keys tls.crt / tls.key
+    session:  {existingSecret: tinycdi-backend-session-tls}  # MUST cover *.<sessionDomain> (wildcard cert)
+    internal:
+      existingSecret: tinycdi-backend-internal-tls
+      # Per-certificate revocation on the internal mTLS listener (ADR
+      # 0008, SR-3-F5): a Secret carrying the serial blocklist file —
+      # "<serial-hex> <issuer-dn>" per line, blank lines and '#' comments
+      # ignored. Mounted read-only at /etc/internal-revoked/ and polled;
+      # a listed leaf's handshake is aborted and its live conns severed.
+      # empty = feature off (render byte-identical to before).
+      revokedSerials:
+        existingSecret: ""                    # Secret holding the blocklist file
+        key: revoked-serials.txt              # key within the Secret
+  # CA bundle the internal mTLS listener verifies client certs against
+  # (the operator's broker client cert).
+  clientCA:
+    existingSecret: tinycdi-internal-ca        # key ca.crt
+    key: ca.crt
+  # CN the internal mTLS listener requires on the operator client
+  # certificate (workspace revoke/drain routes). Empty = "operator".
+  operatorCN: ""
+  # Optional extra trust bundle for outbound calls (e.g. internal IdP CA).
+  extraCA:
+    existingSecret: ""                          # empty disables SSL_CERT_FILE
+    key: ca.crt
+  # Optional default CA for runtime upstreams.
+  upstreamCA:
+    existingSecret: ""
+    key: ca.crt
+  # /v1/control/* bearer token. Optional — when unset the control routes
+  # stay closed (fail-closed). Mounted as a file via -control-token-file.
+  controlToken:
+    existingSecret: ""      # e.g. tinycdi-backend-control-token
+    key: token
+  # Extra Origins (beyond https://<portalHost>) the app listener accepts
+  # on cookie-authenticated state-changing requests and the session
+  # listener on launch POSTs (CSRF + ADR 0004 Origin allowlists; the
+  # session listener also sends them as frame-ancestors). Full
+  # scheme://host[:port] origins only.
+  extraPortalOrigins: []
+  # Extra Hosts allowed on the session listener's in-cluster control
+  # surface (/healthz and bearer-gated /v1/control/*) — on TOP of the
+  # backend[.<ns>[.svc[.cluster.local]]] Service names, which are always
+  # allowed. Workspace hosts are <label>.<sessionDomain> and never serve
+  # the control routes.
+  controlHosts: []
+  # CIDRs of the reverse proxies in front of the app/session listeners
+  # whose X-Forwarded-For claims the backend trusts (E7/TM-32): per-client
+  # rate limits and the runtime-bound forwarded headers derive the client
+  # from the right-most untrusted chain entry. REQUIRED behind an ingress
+  # or Gateway — empty keys every limit on the edge's own address, so all
+  # users share one bucket (the backend logs a startup warning). List
+  # every hop in front; a dual-stack edge needs its IPv6 CIDRs alongside
+  # the IPv4 ones or v6 clients collapse into the proxy's /64 bucket.
+  # See the README "Rate limits and trusted proxies" for Cilium/Traefik
+  # examples.
+  # Never list a range where workspace pods run (the cluster pod CIDR): a
+  # trusted peer picks its own client key through X-Forwarded-For.
+  # Authenticated traffic keys per session (session probe, live-session
+  # re-launches) or per validated OIDC state (callback, bounded by a 10x
+  # per-IP ceiling), not per client IP; the anonymous surface — login
+  # start, unauthenticated probes — shares the IP bucket. Tune
+  # -login-rate/-launch-rate via backend.extraArgs — each flag is the
+  # aggregate bound across replicas, enforced by the shared Postgres
+  # window (ADR 0006); the chart passes -rate-limit-replicas=backend.replicas
+  # so each pod's local bucket is its 1/N ceiling — the cap per pod while
+  # Postgres is healthy and the fail-open limit during a store outage.
+  trustedProxies: []
+  # Ticket audience; defaults to sessionDomain.
+  audience: ""
+  # Terminal-row retention (SR-4-F5): connection_lease and launch_ticket
+  # are append-mostly — the leader replica's hourly sweep deletes rows
+  # that have been terminal (lease revoked/expired/superseded, ticket
+  # consumed/revoked/expired) for longer than terminalRowDays, keeping
+  # both tables bounded. A pruned row is unreachable history only — no
+  # reader depends on terminal rows (live leases and outstanding tickets
+  # are never touched). 0 disables the sweep and the tables grow without
+  # bound. Rendered as -terminal-retention-days=<n>.
+  retention:
+    terminalRowDays: 30
+    # Days audit_event rows are kept (ADR 0010); a daily leader task prunes
+    # older rows. 1..3650. Rendered as -audit-retention-days=<n>.
+    auditDays: 90
+  fileTransfer:
+    # Platform per-file bound for session file transfer (ADR 0009 §5).
+    # A tenant ceiling may only lower it. Rendered as
+    # -file-transfer-max-bytes=<n>. 1..10737418240.
+    maxFileBytes: 104857600
+  # Metrics listener — served on the dedicated ClusterIP backend-metrics
+  # Service, never on the public Service (SEC-33).
+  # networkPolicy.prometheusPeers must be set when enabled.
+  metrics:
+    enabled: false
+    port: 9090
+  service:
+    annotations: {}
+  # PodDisruptionBudget — ON by default (D22): minAvailable 1 keeps a
+  # replica serving through voluntary disruption. A pdb block with a
+  # sizing key renders; enabled: false removes it.
+  pdb:
+    minAvailable: 1
+    maxUnavailable: null
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: "1", memory: 256Mi}
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # Pod hostAliases (spec.hostAliases) — extra /etc/hosts entries in the
+  # backend pods, e.g. resolving an in-cluster OIDC issuer host to a
+  # Service ClusterIP when cluster DNS cannot. Empty renders nothing.
+  hostAliases: []
+  # Pod/container securityContext keys MERGE over the hardened defaults
+  # (runAsNonRoot, drop ALL caps, read-only rootfs). Override keys only
+  # when you must — the defaults are what the chart tests assert.
+  podSecurityContext: {}
+  securityContext: {}
+  extraArgs: []
+  # Extra container env entries [{name, value|valueFrom}] appended after
+  # the chart's managed env — dev-surface names and duplicates of managed
+  # names fail the render unless dev.enabled (see the dev gate below).
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
+
+operator:
+  # E4: two replicas with leader election — one active reconciler and one
+  # standby; the standby takes over the leader-election Lease when the
+  # leader goes away. Single-replica installs may set replicas: 1;
+  # leaderElect can stay true (one replica simply holds the lease).
+  # leaderElect=false with replicas>1 fails the render — unelected
+  # replicas would double-drive reconciliation.
+  replicas: 2
+  leaderElect: true
+  webhookPort: -1           # -1 disables the webhook server
+  # Operator metrics are not exposed: controller-runtime's secure mode
+  # (HTTPS + authn/authz filter) needs cluster-scoped TokenReview and
+  # SubjectAccessReview RBAC this chart refuses to grant, and plain-HTTP
+  # metrics are banned — the endpoint is pinned off (--metrics-bind-address=0).
+  # CIDRs subtracted from runtime InternetOnly egress (RFC1918, CGNAT,
+  # loopback/metadata, corp ranges).
+  internetExceptCIDRs: []
+  # Cluster CIDRs (pod, Service and node ranges of THIS cluster) — appended
+  # to --internet-except-cidrs. The render FAILS when this is empty while a
+  # seeded template uses networkProfile: InternetOnly (SEC-02).
+  clusterCIDRs: []
+  # Internal broker client (ADR 0003): the teardown finalizer's lease/
+  # stream seams call the backend internal mTLS listener with an operator
+  # client certificate (CN=operator unless backend.operatorCN overrides —
+  # the only identity the workspace revoke/drain routes accept).
+  brokerClient:
+    enabled: true
+    # Base URL of the backend internal listener; defaults to
+    # https://backend.<release-namespace>.svc:9443.
+    internalURL: ""
+    # CA bundle verifying the broker listener. Defaults to the same
+    # internal CA the backend uses to verify client certs.
+    ca:
+      existingSecret: tinycdi-internal-ca
+      key: ca.crt
+    # Operator mTLS client identity, keys tls.crt / tls.key.
+    mtls:
+      existingSecret: tinycdi-operator-mtls
+  # ENVTEST/DEV ONLY: run with no broker — teardown uses the standalone
+  # no-op seams. Without this the operator fails fast when the broker
+  # client is not wired; never set it in production.
+  devAllowNoBroker: false
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: "1", memory: 256Mi}
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podSecurityContext: {}
+  securityContext: {}
+  # PodDisruptionBudget — ON by default (E4): minAvailable 1 keeps a
+  # reconciler live through voluntary disruption.
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+    maxUnavailable: null
+  extraArgs: []
+  # Same extraEnv rules as backend.extraEnv (see above).
+  extraEnv: []
+
+# Frontend (build/frontend): serves the built portal SPA over TLS with
+# the portal security headers. Static files only — the edge routes
+# portalHost /v1 to the backend app listener, everything else here.
+frontend:
+  replicas: 2
+  tls:
+    existingSecret: tinycdi-frontend-tls       # keys tls.crt / tls.key
+  webRoot: ""               # empty = image default (/srv/web)
+  # Pre-stop drain (FX-R35): on SIGTERM /healthz fails at once, then the
+  # frontend keeps serving for drainDelay while the pod's endpoint removal
+  # propagates to kube-proxy / the edge — a rollover never routes to a pod
+  # that is already gone (a request in that window answers 5xx). Go
+  # duration format (e.g. 8s, 1500ms); the render fails above 20s so at
+  # least 10 s of the 30 s terminationGracePeriodSeconds remains for
+  # graceful shutdown.
+  drainDelay: 8s
+  # Optional operator branding: name a ConfigMap with branding.json,
+  # tokens.css and logo files — mounted read-only at /branding and served
+  # at /branding/ (see README "Branding"). Empty = default branding.
+  branding:
+    configMap: ""
+  service:
+    annotations: {}
+  # PodDisruptionBudget — ON by default (E4): minAvailable 1 keeps a
+  # portal replica serving through voluntary disruption.
+  pdb:
+    enabled: true
+    minAvailable: 1
+    maxUnavailable: null
+  resources:
+    requests: {cpu: 20m, memory: 32Mi}
+    limits: {cpu: 500m, memory: 128Mi}
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podSecurityContext: {}
+  securityContext: {}
+  extraArgs: []
+  # Same extraEnv rules as backend.extraEnv (see above).
+  extraEnv: []
+
+# cert-manager integration for the internal mTLS chain (operator
+# -> backend broker, ADR 0003). When enabled the chart renders
+# Certificate resources that PRODUCE the Secrets named by
+# backend.tls.internal.existingSecret and
+# operator.brokerClient.mtls.existingSecret — the public-edge certs
+# (backend.tls.app, backend.tls.session, frontend.tls) are NOT issued
+# here; point those at real certificates.
+certManager:
+  enabled: false
+  # Signer for the leaf Certificates. Ignored when selfSigned=true. It also
+  # signs the internal client CA, so it must be a dedicated issuer that
+  # signs nothing else (or kind: Issuer in the release namespace): any
+  # certificate it issues with the operator CN can drain workspaces.
+  issuerRef:
+    kind: ClusterIssuer       # Issuer | ClusterIssuer
+    name: ""
+  # Bootstrap a self-signed CA inside the release: selfsigned ClusterIssuer
+  # -> CA Certificate (isCA) -> Issuer, then sign the leaf certs with it.
+  selfSigned: false
+  # Secret the bootstrap CA writes (key ca.crt). Point
+  # backend.clientCA.existingSecret and
+  # operator.brokerClient.ca.existingSecret at this name when selfSigned.
+  caSecretName: ""            # default <release>-internal-ca
+  # Subject fields on the issued leaf certificates.
+  duration: 2160h             # 90d
+  renewBefore: 360h           # 15d
+
+# Exposure, option A: Kubernetes Ingress for both public edges.
+# Mutually exclusive with gatewayApi.enabled. Both pods terminate TLS
+# themselves — set backend pass-through annotations via
+# ingress.annotations for L7 ingresses, or expose the Services directly.
+ingress:
+  enabled: false
+  className: ""
+  # Annotations applied to BOTH ingresses.
+  annotations: {}
+    # nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+  # Extra annotations per edge.
+  portalAnnotations: {}
+  sessionAnnotations: {}
+  tls:
+    existingSecret: ""      # Secret with the ingress TLS cert (both hosts)
+
+# Exposure, option B: Gateway API HTTPRoutes for both public edges.
+# Mutually exclusive with ingress.enabled. The backend Services speak
+# HTTPS — the Gateway implementation must pass through or re-encrypt to
+# the backend (e.g. Envoy Gateway BackendTLSPolicy); plain HTTP routing to
+# these Services will not work.
+gatewayApi:
+  enabled: false
+  # Gateway listener refs, e.g.
+  #   - {name: shared-gateway, namespace: gateway-system, sectionName: https}
+  parentRefs: []
+  # Optional per-route overrides: portalParentRefs parents the portal
+  # HTTPRoute (the portalHost), sessionParentRefs the wildcard session
+  # route (*.<sessionDomain>) — e.g. two listeners on one Gateway
+  # (cdi-https for the portal host, wildcard-https for the session
+  # domain). A non-empty list REPLACES parentRefs for that route; empty
+  # falls back to the shared parentRefs.
+  portalParentRefs: []
+  sessionParentRefs: []
+  # Annotations applied to BOTH HTTPRoutes.
+  annotations: {}
+  # Extra annotations per route, merged OVER the shared annotations —
+  # on a key collision the per-route value wins (e.g. a CDN proxy flag
+  # ON for the portal route, OFF for the long-lived-websocket session
+  # route; a link annotation on the portal route only).
+  portalAnnotations: {}
+  sessionAnnotations: {}
+  # HTTPRoute object names — the defaults render the same names every
+  # earlier chart release produced; rename only if your GitOps wrapper
+  # pairs hand-written routes by name (e.g. a <name>-redirect route
+  # next to each).
+  portalRouteName: portal
+  sessionRouteName: session
+
+# Optional Prometheus ServiceMonitor for the backend metrics endpoint
+# (backend.metrics) — served by the dedicated ClusterIP
+# backend-metrics Service, never on the public port. The operator exposes
+# no metrics endpoint (see the operator section).
+serviceMonitor:
+  enabled: false
+  labels: {}            # e.g. {release: prometheus} to match your stack
+  interval: ""
+  scrapeTimeout: ""
+  honorLabels: false
+
+# Optional Grafana dashboards (E8) — one ConfigMap per JSON file under
+# files/dashboards/, side-loaded by the Grafana dashboard sidecar.
+# Requires backend.metrics.enabled: every panel reads the tinycdi_*
+# series the backend metrics listener serves.
+dashboards:
+  enabled: false
+  # Labels ON the dashboard ConfigMaps — the sidecar's discovery labels.
+  # kube-prometheus-stack default is grafana_dashboard: "1"; set your
+  # Grafana's label/labelValue here when it differs.
+  labels:
+    grafana_dashboard: "1"
+
+# Optional PrometheusRule (E8) — the platform alert set (README "Alerts").
+# Requires backend.metrics.enabled plus the Prometheus Operator CRDs;
+# pair with serviceMonitor so something actually scrapes the series.
+alerts:
+  enabled: false
+  labels: {}            # e.g. {release: prometheus} — the operator's ruleSelector
+  # TinyCDISessionDropSpike floor: minimum live sessions 5m back required
+  # for the drop alert to fire — keeps a small install draining at night
+  # (2→0) from paging critical. 0 disables the floor.
+  sessionDropFloor: 5
+
+# Optional admission hardening (TM-45) — renders a ValidatingAdmissionPolicy
+# + binding that DENIES create/update of Workspace objects in the
+# managedNamespaces when the request adds, changes or removes the
+# workspaces.cdi.tinyorbit.vn/template-snapshot annotation, unless the
+# caller is the operator ServiceAccount — the rendered identity is
+# system:serviceaccount:<release-namespace>:operator (the chart's
+# serviceaccounts.yaml names it "operator" in Release.Namespace). The
+# annotation is the operator's read-only mirror of status.templateSnapshot
+# — nothing trusted reads it, but letting Workspace writers (the backend
+# SA, GitOps) edit it leaves a stale mirror other readers can see; this
+# policy makes the mirror operator-only at the API boundary.
+# Requires Kubernetes >= 1.30 (admissionregistration.k8s.io/v1) — already
+# the chart-wide floor via Chart.yaml kubeVersion.
+admissionPolicy:
+  enabled: false
+  # Additional usernames allowed to write the annotation — exact
+  # request.userInfo.username matches, e.g. a restore controller's
+  # system:serviceaccount:<ns>:<sa>. The operator identity above is always
+  # allowed. Needed only when tooling legitimately replays the mirror
+  # (e.g. a cluster-manifest restore — see docs/runbooks/backup-restore.md);
+  # leave empty otherwise.
+  extraAllowedUsernames: []
+
+networkPolicy:
+  enabled: true
+  # Egress peers for the cluster apiserver (pods labeled
+  # cdi.tinyorbit.vn/needs-apiserver). Kind default service IP is 10.96.0.1;
+  # RKE2/canal commonly uses 10.43.0.1 — set what `kubectl get svc
+  # kubernetes -n default` reports.
+  apiServerPeers:
+    - ipBlock: {cidr: 10.96.0.1/32}
+  apiServerPort: 443
+  # DNS egress peers (CoreDNS). Default matches kube-system kube-dns and
+  # rke2-coredns pods; replace with namespace/ipBlock peers as needed.
+  dnsPeers:
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: kube-system}
+  # Ingress peers allowed to scrape the backend metrics endpoint (only
+  # relevant when backend.metrics.enabled is set). REQUIRED then — an
+  # empty list fails the render rather than opening metrics to every
+  # namespace.
+  prometheusPeers: []
+  # How edge (Ingress/Gateway) traffic may reach the public listeners —
+  # backend :8443 (app) and :8444 (session), frontend :8443:
+  #   ipBlock: the edgeIngressCIDRs peers below (REQUIRED — an empty list
+  #            fails closed rather than admitting every source)
+  #   any:     every source, the TLS ports only
+  #   cilium:  no NetworkPolicy peers — the *-edge-ingress
+  #            CiliumNetworkPolicies admit the ingress fabric instead
+  edgeIngress: ipBlock
+  edgeIngressCIDRs: ["0.0.0.0/0"]   # everywhere — narrow to the LB range
+
+# Default StorageClass annotation applied to seeded templates that do not
+# set workspaces.cdi.tinyorbit.vn/storage-class themselves. Retain-policy PVCs
+# created by the operator use it.
+storageClass: ""
+
+# Runtime pod placement — WHERE workspace pods schedule. The default is a
+# dedicated pool: the operator is passed --runtime-node-selector /
+# --runtime-tolerations so every runtime pod selects nodes labeled
+# cdi.tinyorbit.vn/workspace=true and tolerates the matching NoSchedule
+# taint, and the node-profile installer DaemonSet targets the same pool.
+# Prepare the pool BEFORE workspaces launch — label + taint commands are
+# in docs/runbooks/install.md "Workspace node pool". A template's
+# spec.placement overrides these defaults per field.
+#
+# allowSharedNodes: false with an empty nodeSelector fails the render —
+# a dedicated pool must select at least one label, or every runtime pod
+# would stay Pending.
+#
+# allowSharedNodes: true opts OUT (kind/dev clusters only): no placement
+# flags are passed, runtime pods schedule anywhere, and the install NOTES
+# warn. Shared-node scheduling gives up node-level isolation between user
+# desktops and other workloads — keep the dedicated pool in production.
+runtime:
+  placement:
+    allowSharedNodes: false
+    nodeSelector: {cdi.tinyorbit.vn/workspace: "true"}
+    tolerations:
+      - {key: cdi.tinyorbit.vn/workspace, operator: Exists, effect: NoSchedule}
+  # Default pod.spec.hostUsers for runtime pods (--runtime-host-users).
+  # false: runtime pods run in their own user namespace (verified on the
+  # reference environment — see docs/compatibility.md).
+  # null leaves the field unset (the apiserver default — host user
+  # namespace); a template's spec.linux.hostUsers overrides either way.
+  hostUsers: false
+  # AppArmor for runtime pods (--runtime-apparmor-require-default). true
+  # (default): every runtime container carries an explicit
+  # securityContext.appArmorProfile=RuntimeDefault. Set false on nodes
+  # WITHOUT AppArmor (kind, RHEL-family/SELinux-based distributions): the
+  # kubelet refuses a pod that names an AppArmor profile there ("Cannot
+  # enforce AppArmor: AppArmor is not enabled on the host"). false omits
+  # the RuntimeDefault field only — seccomp, capabilities, runAsNonRoot,
+  # allowPrivilegeEscalation and hostUsers are unchanged. A template with a
+  # Localhost AppArmor profile (e.g. browser templates) is still set and
+  # cannot run on such nodes. See install.md "Nodes without AppArmor".
+  appArmor:
+    requireRuntimeDefault: true
+  # Soft topology spread for runtime pods (--runtime-topology-spread).
+  # true (default): every workspace pod carries a topologySpreadConstraint
+  # (maxSkew 1, topologyKey kubernetes.io/hostname, whenUnsatisfiable
+  # ScheduleAnyway) that prefers spreading the tenant namespace's runtime
+  # pods across pool nodes — the soak finding it answers is the default
+  # scheduler packing sessions onto a subset of nodes
+  # (docs/runbooks/capacity.md). It is soft, so it NEVER blocks
+  # scheduling: retained-disk reattach on a node-pinned PVC and
+  # single-node pools still work. Set enabled=false to keep the
+  # scheduler's default packed-by-scoring placement.
+  topologySpread:
+    enabled: true
+  # Per-workspace boundary NetworkPolicy posture (operator flag
+  # --runtime-clusteronly-egress). networkProfile: ClusterOnly is
+  # RESTRICTED by default: with no values set here the operator confines
+  # workspace egress to pods in namespaces labelled
+  # workspaces.cdi.tinyorbit.vn/tenant — the managed namespaces — so
+  # third-party pods outside them (monitoring, a Postgres-as-pod, stray
+  # workloads) are unreachable. DNS egress is unaffected.
+  #
+  # unrestricted: true opts OUT — it renders
+  # --runtime-clusteronly-egress=unrestricted and allows any pod in any
+  # namespace on any port (confinement rests entirely on destination-side
+  # ingress policies). It cannot be combined
+  # with the egress* selectors below — the render fails.
+  #
+  # To narrow further instead, set egressNamespaceSelector to confine
+  # ClusterOnly egress to pods in matching namespaces, optionally
+  # narrowed by egressPodSelector and/or egressPorts. An
+  # egressPodSelector without egressNamespaceSelector matches pods in
+  # the workspace's own namespace only (NetworkPolicyPeer semantics).
+  # EMPTY egress* values render no flag (the restricted default stands).
+  #   networkProfiles:
+  #     clusterOnly:
+  #       egressNamespaceSelector:
+  #         matchExpressions:
+  #           - {key: workspaces.cdi.tinyorbit.vn/tenant, operator: Exists}
+  #       egressPorts:
+  #         - {protocol: TCP, port: 443}
+  networkProfiles:
+    clusterOnly:
+      unrestricted: false
+      egressNamespaceSelector: {}
+      egressPodSelector: {}
+      egressPorts: []
+
+# Node security profiles for browser workspaces — OPTIONAL, default OFF.
+# Browser templates reference Localhost seccomp/AppArmor profiles that must
+# exist on the node BEFORE the pod is created. nodeProfiles.install.enabled
+# renders a per-node installer DaemonSet in a DEDICATED namespace
+# (privileged + hostPID initContainer — the only privileged object in the
+# chart; the long-running verifier is uid 0 with ALL capabilities dropped —
+# the minimum that can still read the host's AppArmor loaded list) writes
+# <kubeletRoot>/seccomp/profiles/chromium-userns.json, installs
+# /etc/apparmor.d/tinycdi-browser on the host and loads it with the host's
+# apparmor_parser (survives reboots). It refuses on nodes without AppArmor
+# or a parser and reports Ready only once both profiles are verified.
+# Rollout race: a browser pod scheduled on a node before its installer pod
+# is Ready fails to start and is retried — watch
+# `kubectl -n <ns> get ds node-profiles`. See README "Node profiles" and
+# deploy/node-profiles/README.md.
+nodeProfiles:
+  install:
+    enabled: false
+    # install = write files + load the AppArmor profile; remove = unload the
+    # profile and delete both files (idempotent — the DaemonSet is then
+    # Ready when every node is clean, and can be disabled afterwards).
+    mode: install
+    # Dedicated namespace for the installer. It is created by the chart
+    # (createNamespace) labelled pod-security.kubernetes.io/enforce=
+    # privileged and carries NO RBAC — nothing in it may write configmaps
+    # or pods. The render refuses the release namespace, a managed
+    # namespace, kube-* and default — the privileged-enforce label must
+    # never land on those (CHTR-2). With createNamespace=false, create the
+    # namespace yourself with that label before install.
+    namespace: tinycdi-node-profiles
+    createNamespace: true
+    image:
+      # Minimal, publicly pullable, digest-pinned (digest wins over tag).
+      # busybox provides nsenter, sha256sum, sed — no other tooling needed.
+      repository: alpine
+      tag: "3.21"
+      digest: sha256:ce64758a109eb420d874a118f87920e625e12d3634e03b4a5573fd9f6e5d3507
+    # Kubelet root dir on the nodes (the Localhost seccomp base). Default
+    # matches upstream kubelet; RKE2/k3s custom --root-dir goes here.
+    # Only <kubeletRoot>/seccomp/profiles is hostPath-mounted — never the
+    # whole kubelet root, which holds every pod's projected secrets.
+    kubeletRoot: /var/lib/kubelet
+    # Placed on all Linux nodes except control-plane by default (a
+    # nodeAffinity excludes node-role.kubernetes.io/control-plane|master);
+    # nodeSelector entries merge over kubernetes.io/os=linux.
+    nodeSelector: {}
+    tolerations: []
+    priorityClassName: ""
+    # Applied to BOTH the privileged install initContainer and the
+    # caps-dropped uid-0 verifier; the defaults are deliberately small.
+    resources:
+      requests: {cpu: 10m, memory: 32Mi}
+      limits: {cpu: 200m, memory: 128Mi}
+
+# Seed WorkspaceTemplate CRs — the runtime catalog. spec is passed through
+# verbatim (the CRD validates it); spec.linux.image may be omitted and is
+# then resolved from `image:` — either a key into .Values.images
+# ("linuxDesktop", "browser"; global.imageRegistry applies) or a literal
+# digest-pinned reference.
+#
+# Image freshness: `image:` naming an images key renders the
+# workspaces.cdi.tinyorbit.vn/image-built-at annotation from
+# images.<key>.builtAt; a literal `image:` reference (e.g. a digest-pinned
+# kasmweb/* image) takes the template entry's own `imageBuiltAt` (RFC 3339).
+#
+# Placement/confinement fields map to the annotations the runtime backend
+# honors (only Localhost node profiles are accepted — anything else
+# rejects the template):
+#   seccompProfile:  <name> -> workspaces.cdi.tinyorbit.vn/seccomp-profile: localhost/<name>
+#   appArmorProfile: <name> -> workspaces.cdi.tinyorbit.vn/apparmor-profile: localhost/<name>
+#   storageClass:    <name>  -> workspaces.cdi.tinyorbit.vn/storage-class
+# The node profiles must be PRE-LOADED on the nodes that run these
+# templates (see README prerequisites). Runtime pod placement —
+# nodeSelector, tolerations (max 16) and runtimeClassName — lives in the
+# typed spec.placement block (spec passes through verbatim below).
+templates: []
+  # - name: linuxdesk1
+  #   namespace: tinycdi-tenant-a
+  #   image: linuxDesktop            # resolved from .Values.images; digest required
+  #   storageClass: longhorn
+  #   spec:
+  #     revision: "2026-10-a"
+  #     runtime: LinuxContainer
+  #     experience: Desktop
+  #     linux: {}                    # image filled from `image:` above
+  #     placement:
+  #       nodeSelector: {workload: runtime}
+  #       tolerations: [{key: cdi.tinyorbit.vn/workspace, operator: Exists, effect: NoSchedule}]
+  #     resources: {cpu: "1", memory: 2Gi, storage: 5Gi}
+  #     bootDeadline: 5m
+  #     # Isolated denies all egress except cluster DNS — DNS resolution
+  #     # stays allowed by design (a deliberate unidirectional channel).
+  #     # ClusterOnly egress is restricted to managed tenant namespaces
+  #     # by default; runtime.networkProfiles.clusterOnly narrows it via
+  #     # selectors, and unrestricted: true opts out to any-pod egress.
+  #     networkProfile: Isolated
+  #     # Clipboard redirection between the user's device and the
+  #     # workspace, named from the user's point of view (normative
+  #     # semantics: internal/api/openapi.yaml): Disabled | Send (client
+  #     # to workspace) | Receive (workspace to client) | Bidirectional.
+  #     # Enforced server-side by the session server's KasmVNC DLP block (no VNC parameter is runtime-overridable) —
+  #     # the operator passes it to the pod as TCDI_CLIPBOARD_POLICY and a
+  #     # change applies on the workspace's next start.
+  #     clipboardPolicy: Disabled
+  #     lifecycle: {idleTimeout: 30m, disconnectTimeout: 5m, maxDuration: 8h, dataPolicy: Ephemeral}
+  # - name: browser01
+  #   namespace: tinycdi-tenant-a
+  #   image: browser
+  #   seccompProfile: localhost/profiles/chromium-userns.json
+  #   appArmorProfile: tinycdi-browser
+  #   spec: { ... experience: Browser ... }
+
+# Pod Security Standards level for the managed (tenant) namespaces the
+# chart creates — their enforce and warn labels. The release namespace is
+# created and labelled by the installer (docs/runbooks/install.md,
+# "Install"); the chart never labels it. managedEnforce=privileged is
+# refused unless dev.enabled — it would reopen operator→privileged-pod
+# (CHTR-2).
+podSecurity:
+  managedEnforce: restricted
+
+# Explicit development-mode gate. While false (the only supported value
+# for production), the render FAILS on dev surfaces:
+# operator.devAllowNoBroker; extraArgs naming any flag the chart renders
+# or owns for that component, or the flag form of a denied env name
+# (backend -rate-limit-replicas and -login-key-file excepted); extraEnv
+# entries carrying a dev-surface env name or the env equivalent of a
+# security-relevant first-class value (TCDI_DEV_INSECURE_DB,
+# TCDI_DEV_ALLOW_NO_BROKER, TCDI_METRICS_LISTEN,
+# TCDI_KASM_ADAPTER_IMAGE, PGSSLMODE, TCDI_OPERATOR_CN,
+# TCDI_WATCH_NAMESPACES, TCDI_REQUIRED_GROUPS,
+# TCDI_CONTROL_TOKEN/TCDI_CONTROL_TOKEN_FILE, TCDI_TRUSTED_PROXIES,
+# TCDI_UPSTREAM_CA, TCDI_OIDC_POST_LOGOUT_REDIRECT, TCDI_TENANT_QUOTAS,
+# TCDI_TENANT_QUOTA_CEILINGS,
+# TCDI_BROKER_URL/TCDI_BROKER_CA/TCDI_MTLS_CERT/TCDI_MTLS_KEY,
+# SSL_CERT_FILE/SSL_CERT_DIR, the TCDI_ form of any denied flag — the
+# render error names the value to use instead), a non-map/nameless
+# entry, or an env var the chart manages for that component; any
+# podSecurityContext/securityContext override that would weaken the
+# hardened defaults (privileged, allowPrivilegeEscalation, added or
+# replaced capabilities, runAsNonRoot=false, uid/gid/fsGroup 0, writable
+# rootfs, unconfined seccomp, appArmorProfile=Unconfined,
+# seLinuxOptions); hostPath backend.extraVolumes; a non-verifying
+# database.tls.mode (""/prefer/require/allow/disable); and
+# podSecurity.managedEnforce=privileged. hostUsers=false is a hardening
+# and stays allowed. Never true in a release values file.
+dev:
+  enabled: false

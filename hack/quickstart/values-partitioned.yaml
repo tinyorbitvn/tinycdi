@@ -1,0 +1,15 @@
+# Values overlay for up.sh (TCDI_QS_VALUES_OVERLAY): install the same
+# quickstart with the session cookie in `partitioned` mode — SameSite=None,
+# Secure and Partitioned (CHIPS), the mode a deployment uses when portal
+# and session domains sit on different registrable domains so the session
+# frame loads cross-site. Pair with the partitioned smoke variant:
+#
+#   TCDI_QS_VALUES_OVERLAY=hack/quickstart/values-partitioned.yaml hack/quickstart/up.sh
+#   (cd hack/quickstart/smoke && npx playwright test -c playwright.partitioned.config.ts)
+#
+# The quickstart's own portal/session hosts are same-site, so this overlay
+# proves the mode end to end (attributes minted, cookie stored partitioned,
+# reconnect and rehydrate working) rather than the cross-site need itself.
+
+backend:
+  sessionCookieMode: partitioned

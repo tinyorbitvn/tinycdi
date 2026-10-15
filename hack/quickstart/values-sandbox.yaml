@@ -1,0 +1,144 @@
+# TinyCDI chart values for the SANDBOXED-RUNTIME quickstart (DEV ONLY —
+# sandbox-up.sh / .github/workflows/sandbox.yml).
+#
+# Mirrors values.yaml exactly, except every seeded template carries
+# spec.placement.runtimeClassName: gvisor — the RuntimeClass sandbox-gvisor.sh
+# registers on the kind node. Keep the rest in sync with values.yaml; it is a
+# full values file (TCDI_QS_VALUES replaces the primary file, it does not
+# overlay it).
+
+managedNamespaces:
+  - name: tinycdi-tenant-a
+    tenant: tenant-a
+    quota:
+      runningWorkspaces: 2
+      cpu: "4"
+      memory: 8Gi
+      storage: 20Gi
+  - name: tinycdi-tenant-noquota
+    tenant: tenant-noquota
+
+portalHost: portal.tcdi.localtest.me
+sessionDomain: session.tcdi.localtest.me
+
+oidc:
+  issuer: https://keycloak.tcdi.localtest.me/realms/tinycdi
+  clientID: tinycdi
+  existingSecret: tinycdi-oidc-client
+  egressCIDRs: [0.0.0.0/0]
+  port: 8443
+
+database:
+  existingSecret: tinycdi-backend-db
+  allowedPeers:
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: tcdi-qs-deps}
+      podSelector:
+        matchLabels: {app.kubernetes.io/name: postgres}
+  tls:
+    mode: verify-full
+    caSecret: {name: tinycdi-db-ca, key: ca.crt}
+
+backend:
+  replicas: 2
+  loginKeys:
+    generate: true
+  tls:
+    app: {existingSecret: tinycdi-backend-app-tls}
+    session: {existingSecret: tinycdi-backend-session-tls}
+    internal: {existingSecret: tinycdi-backend-internal-tls}
+  clientCA: {existingSecret: tinycdi-internal-ca}
+  extraCA: {existingSecret: tinycdi-local-ca, key: ca.crt}
+  service:
+    annotations:
+      traefik.ingress.kubernetes.io/service.serversscheme: https
+
+operator:
+  brokerClient:
+    ca: {existingSecret: tinycdi-internal-ca}
+    mtls: {existingSecret: tinycdi-operator-mtls}
+
+frontend:
+  tls: {existingSecret: tinycdi-frontend-tls}
+  service:
+    annotations:
+      traefik.ingress.kubernetes.io/service.serversscheme: https
+
+ingress:
+  enabled: true
+  className: traefik
+  tls: {existingSecret: tinycdi-ingress-tls}
+
+runtime:
+  placement:
+    allowSharedNodes: true
+  appArmor:
+    requireRuntimeDefault: false
+  hostUsers: null
+
+templates:
+  - name: browser
+    namespace: tinycdi-tenant-a
+    image: browser
+    annotations:
+      workspaces.cdi.tinyorbit.vn/display-name: "Browser (quickstart)"
+    spec:
+      revision: "quickstart-1"
+      runtime: LinuxContainer
+      experience: Browser
+      linux:
+        command: [env, TCDI_BROWSER=firefox, /opt/tcdi/entrypoint.sh]
+      placement:
+        runtimeClassName: gvisor
+      resources: {cpu: "1", memory: 2Gi, storage: 5Gi}
+      bootDeadline: 10m
+      networkProfile: Isolated
+      clipboardPolicy: Disabled
+      lifecycle:
+        idleTimeout: 30m
+        disconnectTimeout: 5m
+        maxDuration: 8h
+        dataPolicy: Ephemeral
+  - name: desktop
+    namespace: tinycdi-tenant-a
+    image: linuxDesktop
+    annotations:
+      workspaces.cdi.tinyorbit.vn/display-name: "Linux desktop (quickstart)"
+    spec:
+      revision: "quickstart-1"
+      runtime: LinuxContainer
+      experience: Desktop
+      linux: {}
+      placement:
+        runtimeClassName: gvisor
+      resources: {cpu: "1", memory: 2Gi, storage: 5Gi}
+      bootDeadline: 10m
+      networkProfile: Isolated
+      clipboardPolicy: Disabled
+      lifecycle:
+        idleTimeout: 30m
+        disconnectTimeout: 5m
+        maxDuration: 8h
+        dataPolicy: Ephemeral
+  - name: browser
+    namespace: tinycdi-tenant-noquota
+    image: browser
+    annotations:
+      workspaces.cdi.tinyorbit.vn/display-name: "Browser (quickstart)"
+    spec:
+      revision: "quickstart-1"
+      runtime: LinuxContainer
+      experience: Browser
+      linux:
+        command: [env, TCDI_BROWSER=firefox, /opt/tcdi/entrypoint.sh]
+      placement:
+        runtimeClassName: gvisor
+      resources: {cpu: "1", memory: 2Gi, storage: 5Gi}
+      bootDeadline: 10m
+      networkProfile: Isolated
+      clipboardPolicy: Disabled
+      lifecycle:
+        idleTimeout: 30m
+        disconnectTimeout: 5m
+        maxDuration: 8h
+        dataPolicy: Ephemeral

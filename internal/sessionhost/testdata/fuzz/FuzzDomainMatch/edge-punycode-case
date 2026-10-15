@@ -1,0 +1,4 @@
+go test fuzz v1
+string("xn--ssion-qta.example.com")
+string("WS-ABCDEFGH.XN--SSION-QTA.EXAMPLE.COM")
+string("ws_ABCDEFGH")

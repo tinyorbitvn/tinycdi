@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script src="/theme-init.js"></script>
+    <link rel="stylesheet" href="/src/styles/index.css" />
+    <!-- Operator branding overrides: the frontend serves -branding-dir at
+         /branding/ and answers an empty stylesheet when unset. The build moves this link
+         after the bundled stylesheet (vite.config.ts) so overrides win. -->
+    <link rel="stylesheet" href="/branding/tokens.css" />
+    <!-- Favicons live in the web root (web/public); a favicon.svg / favicon.ico
+         in the branding directory replaces them at the same URL. -->
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon.ico" sizes="48x48" />
+    <title>TinyCDI</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,71 @@
+# AppArmor Localhost profile for TinyCDI browser workspace pods.
+# Base: containerd default profile template, pinned source:
+#   https://github.com/containerd/containerd/blob/18c051a77f4ce047ec9f0ca0542b8b4c262a4187/contrib/apparmor/template.go
+#   (tag v2.3.4)
+# One added rule: `userns,` — Ubuntu's designed allowlist for
+# kernel.apparmor_restrict_unprivileged_userns=1.
+#
+# Caveats carried from the upstream template:
+# - `signal (receive) peer=<daemon>`: the upstream template substitutes the
+#   containerd daemon's own AppArmor profile name at runtime. Value below is a
+#   placeholder — MUST be replaced with the real daemon profile observed on
+#   the node before loading (see deploy/node-profiles/README.md).
+# - `deny mount` may interact with Chromium's nested-mount step inside its own
+#   userns — flagged as a validation item, not silently changed.
+#
+# Node loading/binding is GitOps-owned; install/verify/rollback:
+# deploy/node-profiles/README.md.
+
+#include <tunables/global>
+
+profile tinycdi-browser flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+
+  network,
+  capability,
+  file,
+  umount,
+
+  # TinyCDI addition: permit user-namespace creation for confined
+  # processes. Required on Ubuntu 24.04 nodes where
+  # kernel.apparmor_restrict_unprivileged_userns=1 mediates CLONE_NEWUSER for
+  # any task that lacks CAP_SYS_ADMIN — even AppArmor-unconfined tasks get a
+  # restrictive child policy that denies the subsequent uid_map write
+  # (observed EPERM on RKE2 diag-unconfined).
+  userns,
+
+  # Host (privileged) processes may send signals to container processes.
+  signal (receive) peer=unconfined,
+  # runc may send signals to container processes.
+  signal (receive) peer=runc,
+  # crun may send signals to container processes.
+  signal (receive) peer=crun,
+  # Manager (containerd daemon) may send signals to container processes.
+  # PLACEHOLDER: substitute the daemon's actual AppArmor profile name from the
+  # node (e.g. unconfined or cri-containerd). Verify before loading.
+  signal (receive) peer=cri-containerd,
+  # Container processes may send signals amongst themselves.
+  signal (send,receive) peer=tinycdi-browser,
+
+  deny @{PROC}/* w, # deny write for all files directly in /proc (not in a subdir)
+  # deny write to files not in /proc/ /** or /proc/sys/**
+  deny @{PROC}/{[^1-9/],[^1-9/][^0-9/],[^1-9s/][^0-9y/][^0-9s/],[^1-9/][^0-9/][^0-9/][^0-9/]*}/** w,
+  deny @{PROC}/sys/[^k]** w, # deny /proc/sys except /proc/sys/k* (effectively /proc/sys/kernel)
+  deny @{PROC}/sys/kernel/{?,??,[^s][^h][^m]**} w, # deny everything except shm* in /proc/sys/kernel/
+  deny @{PROC}/sysrq-trigger rwklx,
+  deny @{PROC}/kcore rwklx,
+
+  deny mount,
+
+  deny /sys/[^f]*/** wklx,
+  deny /sys/f[^s]*/** wklx,
+  deny /sys/fs/[^c]*/** wklx,
+  deny /sys/fs/cg[^r]*/** wklx,
+  deny /sys/firmware/** rwklx,
+  deny /sys/devices/virtual/powercap/** rwklx,
+  deny /sys/kernel/security/** rwklx,
+
+  # allow processes within the container to trace each other,
+  # provided all other LSM and yama setting allow it.
+  ptrace (trace,tracedby,read,readby) peer=tinycdi-browser,
+}

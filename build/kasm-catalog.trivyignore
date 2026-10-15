@@ -1,0 +1,16 @@
+# kasm-catalog.trivyignore — expiring trivy exceptions for THIRD-PARTY
+# kasmweb/* catalog images only (build/kasm-catalog.txt). Same policy as
+# .trivyignore (SEC-44): every entry needs reason/approver/expires (<= 30
+# days), enforced by .github/scripts/check-trivyignore.sh and by trivy's
+# native exp: in the generated effective file that scan-kasm-catalog.sh
+# passes to the gate. Exceptions are only acceptable for findings whose
+# code path is dormant under the TinyCDI runtime contract.
+
+# reason:   openssl DTLS-handshake info disclosure; KasmVNC serves
+#           TLS-over-TCP on :8443 only (udp.port pinned 0, NetworkPolicy
+#           allows TCP only), so the DTLS path is unreachable. Bump the
+#           digest to the next -rolling-weekly carrying openssl
+#           >= 3.0.2-0ubuntu1.30 instead of re-approving.
+# approver: devin
+# expires:  2026-10-30
+CVE-2026-84782

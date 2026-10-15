@@ -1,0 +1,6 @@
+go test fuzz v1
+string("ws-0000000a.session.test")
+string("POST")
+string("a=b&x=%")
+string("ticket=%00%2f&ticket")
+string("null")

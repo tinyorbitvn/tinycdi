@@ -1,0 +1,24 @@
+# Invalid: managedNamespaces[].name must be a DNS-1123 label — the value
+# lands verbatim in rendered objects AND in the admissionPolicy CEL
+# managed-namespace list, so the schema pins it before either render path
+# can interpolate it.
+managedNamespaces:
+  - name: "Tenant_A'ops"
+    tenant: tenant-a
+
+portalHost: portal.lab.example.net
+sessionDomain: session.lab.example.net
+
+oidc:
+  issuer: https://idp.lab.example.net/realms/tinycdi
+  clientID: tinycdi
+  existingSecret: tinycdi-oidc-client
+
+database:
+  existingSecret: tinycdi-backend-db
+  allowedPeers:
+    - ipBlock: {cidr: 10.20.30.40/32}
+
+backend:
+  loginKeys:
+    existingSecret: tinycdi-backend-login-keys

@@ -1,0 +1,26 @@
+# Optional Grafana dashboards (E8): one ConfigMap per JSON file under
+# files/dashboards/, labeled for the Grafana dashboard sidecar
+# (kube-prometheus-stack default: grafana_dashboard=1). Requires
+# backend.metrics.enabled — every panel reads the tinycdi_* series the
+# backend metrics listener serves; without it the dashboards are empty.
+{{- if .Values.dashboards.enabled }}
+{{- if not .Values.backend.metrics.enabled }}
+{{- fail "dashboards.enabled requires backend.metrics.enabled (the dashboards only show the backend metrics listener's tinycdi_* series) — set backend.metrics.enabled: true plus networkPolicy.prometheusPeers, or turn dashboards.enabled off" }}
+{{- end }}
+{{- range $path, $_ := .Files.Glob "files/dashboards/*.json" }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "dashboard-%s" (base $path | trimSuffix ".json") | trunc 63 | trimSuffix "-" }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "tinycdi.labels" $ | nindent 4 }}
+    {{- with $.Values.dashboards.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+data:
+  {{ base $path }}: |-
+{{ $.Files.Get $path | indent 4 }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,7 @@
+# legacy-shims.allow — reviewed exceptions to the C1 gate
+# (.github/tests/legacy-shims.test.sh). One per line:
+#   <glob> :: <ERE matched against the line> :: <reason, 10+ chars>
+# Only upstream names (Kubernetes API fields, KasmVNC quirks, generator
+# and module version stamps) belong here — never a TinyCDI history note.
+internal/gateway/proxy.go :: legacy Sec-WebSocket-Origin :: KasmVNC upstream requires the Sec-WebSocket-Origin header by that name
+deploy/helm/*.yaml :: controller-gen\.kubebuilder\.io/version: v0\.[0-9]+ :: controller-gen version stamp written by the generator

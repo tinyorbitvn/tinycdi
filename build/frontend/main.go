@@ -1,0 +1,435 @@
+// Copyright (c) 2026 TinyOrbit
+// SPDX-License-Identifier: MIT
+
+// Command frontend serves the built portal SPA (web/dist) over HTTPS with
+// the portal's browser security policy. It is a static file server only:
+// the public API (/v1/*) is served by the backend on the same portal host,
+// and the edge (Ingress / Gateway API) routes /v1/ there by path — this
+// server never proxies it.
+//
+// Served by the image built from build/frontend/Dockerfile.
+package main
+
+import (
+	"context"
+	"crypto/tls"
+	"errors"
+	"flag"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"sync/atomic"
+	"syscall"
+	"time"
+
+	"github.com/tinyorbitvn/tinycdi/internal/sessionhost"
+	"github.com/tinyorbitvn/tinycdi/internal/tlsreload"
+)
+
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func envDuration(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return def
+}
+
+// draining flips when shutdown starts: /healthz fails at once so the
+// pod's readiness drops and the pod leaves the Service endpoints, while
+// every other route keeps serving through the -drain-delay wait — the
+// edge stops routing before the listener closes (FX-R35).
+var draining atomic.Bool
+
+func main() {
+	var (
+		listen        string
+		webRoot       string
+		tlsCert       string
+		tlsKey        string
+		sessionDomain string
+		brandingDir   string
+		drainDelay    time.Duration
+	)
+	flag.StringVar(&listen, "listen", envOr("TCDI_FRONTEND_LISTEN", ":8443"), "HTTPS listen address")
+	flag.StringVar(&webRoot, "web-root", envOr("TCDI_FRONTEND_WEB_ROOT", "/srv/web"), "directory with the built SPA assets")
+	flag.StringVar(&tlsCert, "tls-cert", envOr("TCDI_FRONTEND_TLS_CERT", ""), "TLS cert file (required)")
+	flag.StringVar(&tlsKey, "tls-key", envOr("TCDI_FRONTEND_TLS_KEY", ""), "TLS key file (required)")
+	flag.StringVar(&sessionDomain, "session-domain", envOr("TCDI_SESSION_DOMAIN", ""),
+		"public session domain (host[:port]) — every workspace session is served on its own "+
+			"<label>.<session-domain> host; the wildcard https://*.<session-domain> is added to CSP frame-src and form-action")
+	flag.StringVar(&brandingDir, "branding-dir", envOr("TCDI_FRONTEND_BRANDING_DIR", ""),
+		"optional directory with branding overrides (branding.json, tokens.css, logo files) served at /branding/")
+	flag.DurationVar(&drainDelay, "drain-delay", envDuration("TCDI_FRONTEND_DRAIN_DELAY", 5*time.Second),
+		"on SIGTERM /healthz fails at once and the server keeps serving this long while the pod's "+
+			"endpoint removal propagates to the edge, then shuts down gracefully; 0 skips the wait")
+	flag.Parse()
+
+	if tlsCert == "" || tlsKey == "" {
+		fmt.Fprintln(os.Stderr, "config: -tls-cert and -tls-key are required")
+		os.Exit(2)
+	}
+	// The session domain goes into the CSP as its wildcard, so it must be a
+	// bare lower-case DNS domain with an optional port — anything else (a
+	// scheme, a path, a wildcard, upper case) is a config error, not a
+	// degraded startup.
+	var domain *sessionhost.Domain
+	if sessionDomain != "" {
+		d, err := sessionhost.ParseDomain(sessionDomain)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "config:", err)
+			os.Exit(2)
+		}
+		domain = &d
+	}
+	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	if domain == nil {
+		// Fail closed: frame-src 'none' and form-action 'self', so sessions
+		// are CSP-blocked until the session domain is configured.
+		log.Warn("no session domain configured: CSP blocks the session frame and launch form; sessions will not open")
+	}
+
+	srv, reloader, err := newTLSServer(listen, tlsCert, tlsKey,
+		newHandler(webRoot, brandingDir, frontendCSP(domain)), tlsreload.WithLogger(log))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "config:", err)
+		os.Exit(2)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go reloader.Run(ctx)
+	log.Info("frontend listening", "addr", listen, "sessionDomain", sessionDomain)
+	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.ListenAndServeTLS("", "") }()
+	select {
+	case err := <-serveErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("serve", "err", err)
+			os.Exit(1)
+		}
+		return
+	case <-sigCtx.Done():
+	}
+	if err := drainAndShutdown(srv, drainDelay, log); err != nil {
+		log.Error("shutdown", "err", err)
+		os.Exit(1)
+	}
+}
+
+// drainAndShutdown (FX-R35) runs the pre-stop drain: /healthz starts
+// failing at once so the pod's readiness drops and it leaves the Service
+// endpoints, but the server keeps answering every other route for delay
+// while the endpoint removal propagates to kube-proxy / the edge — a
+// terminating pod still serves the traffic routed to it. Then the
+// listener shuts down gracefully under a bounded deadline. Without the
+// wait the edge keeps routing to a pod that is already gone for a
+// second or two, surfacing at the portal as a brief Gateway Timeout on a
+// rollover.
+func drainAndShutdown(srv *http.Server, delay time.Duration, log *slog.Logger) error {
+	draining.Store(true)
+	if delay > 0 {
+		log.Info("drain: readiness failing, serving through the propagation wait", "delay", delay)
+		time.Sleep(delay)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return srv.Shutdown(ctx)
+}
+
+// cspBase is sized to the vite build output (external module script +
+// stylesheet only — no inline scripts/styles, eval or workers), so nothing
+// unsafe is needed. The portal itself is never framed (frame-ancestors).
+const cspBase = "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'"
+
+// frontendCSP returns the portal CSP for the configured session domain.
+//
+// The SPA shows a session inside the portal: it submits a form POST
+// carrying the launch ticket to <label>.<sessionDomain>, targeted at an
+// iframe that then stays on that workspace's own host for the stream. So
+// the whole session-domain wildcard must be allowed by both form-action
+// (the POST) and frame-src (the iframe navigation) — https://*.<domain>
+// keeps the configured port when one is set. connect-src: the file-transfer
+// content requests (ADR 0009 §5) go to the workspace's own session host;
+// the portal opens no other cross-origin connection. nil fails closed —
+// frame-src 'none', form-action 'self'.
+func frontendCSP(domain *sessionhost.Domain) string {
+	if domain == nil {
+		return cspBase + "; connect-src 'self'; frame-src 'none'; form-action 'self'"
+	}
+	origin := "https://" + domain.Wildcard()
+	return cspBase + "; connect-src 'self' " + origin + "; frame-src " + origin + "; form-action 'self' " + origin
+}
+
+// securityHeaders pins the browser policy on every frontend response
+// (SEC-22, D14): strict CSP, framing of the portal denied, COOP
+// same-origin, nosniff, Referrer-Policy and HSTS.
+//
+// Referrer-Policy must be strict-origin (or strict-origin-when-cross-origin),
+// never no-referrer/same-origin: the SPA launches a desktop with a
+// cross-site form POST to the workspace's session host, and the browser
+// derives that POST's Origin header from the effective referrer — a policy
+// that suppresses the referrer makes it send Origin: null, which the
+// gateway's launch gate rejects as bad_origin (ADR 0004). strict-origin
+// keeps the privacy property: cross-site requests leak only the bare
+// origin, never the path or query.
+func securityHeaders(csp string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Content-Security-Policy", csp)
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Cross-Origin-Opener-Policy", "same-origin")
+		h.Set("Referrer-Policy", "strict-origin")
+		h.Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
+		next.ServeHTTP(w, r)
+	})
+}
+
+// newHandler builds the frontend mux: the built SPA with the security
+// headers applied to all of it, plus the optional branding directory at
+// /branding/ (same origin, so the CSP is unchanged).
+func newHandler(webRoot, brandingDir, csp string) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		if draining.Load() {
+			http.Error(w, "draining", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	// /v1/ belongs to the backend; the edge routes it there by path. If a
+	// misconfigured route sends it here, answer 404 rather than the SPA
+	// fallback, so the API client sees a clear error instead of HTML.
+	mux.HandleFunc("/v1/", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "the API is served by the backend; check the /v1/ route", http.StatusNotFound)
+	})
+	// SPA fallback: real asset paths serve files; everything else (client
+	// routes like /workspaces/:id/session) serves index.html.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		p := filepath.Clean("/" + r.URL.Path) // force under webRoot
+		full := filepath.Join(webRoot, p)
+		if st, err := os.Stat(full); err == nil && st.Mode().IsRegular() && filepath.Base(p) != "index.html" {
+			if strings.HasPrefix(p, "/assets/") {
+				// vite content-hashes everything under assets/.
+				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			}
+			http.ServeFile(w, r, full)
+			return
+		}
+		if strings.Contains(filepath.Base(p), ".") && filepath.Base(p) != "index.html" {
+			http.NotFound(w, r) // looks like an asset that does not exist
+			return
+		}
+		// index.html references the hashed bundle names, so it must be
+		// revalidated or a deploy leaves browsers on stale bundles.
+		w.Header().Set("Cache-Control", "no-cache")
+		serveIndex(w, r, filepath.Join(webRoot, "index.html"))
+	})
+	// /branding/ is intercepted on the raw request path, ahead of the mux:
+	// ServeMux canonicalises ".."-bearing paths with a redirect, but the
+	// branding contract answers them 404.
+	return securityHeaders(csp, branding(brandingDir, mux))
+}
+
+// branding routes requests under /branding/ to the branding-directory
+// handler and passes everything else through.
+func branding(dir string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/branding" || strings.HasPrefix(r.URL.Path, "/branding/") {
+			serveBranding(dir, w, r)
+			return
+		}
+		// The SPA ships its own favicons in the web root; a same-named file
+		// in the branding directory replaces them at the same URL.
+		if (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
+			(r.URL.Path == "/favicon.svg" || r.URL.Path == "/favicon.ico") {
+			if full := brandingFile(dir, strings.TrimPrefix(r.URL.Path, "/")); full != "" {
+				serveBrandingFile(full, w, r)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// brandingNames is the set of names /branding/ serves: the files the
+// portal loads (branding.json, tokens.css), the favicon overrides, and
+// logo files. A name is one path segment, so subdirectories and the
+// ConfigMap's ..data/ entries never match.
+var brandingNames = regexp.MustCompile(`^(branding\.json|tokens\.css|favicon\.(svg|ico)|logo[A-Za-z0-9_-]{0,64}\.(svg|png))$`)
+
+// brandingNameAllowed reports whether name is a documented branding file.
+func brandingNameAllowed(name string) bool { return brandingNames.MatchString(name) }
+
+// serveBranding serves the documented branding files — branding.json,
+// tokens.css, favicon.svg/.ico and logo*.svg/.png (brandingNames) — from
+// the branding directory (-branding-dir / TCDI_FRONTEND_BRANDING_DIR; the
+// chart mounts a ConfigMap there). GET/HEAD only, no directory listing, Cache-Control
+// no-cache. Escapes are impossible: ".." segments are rejected outright,
+// and a file is served only when its fully-resolved path stays inside the
+// resolved branding dir — a ConfigMap mount makes every key a symlink
+// into ..data, so containment is checked after EvalSymlinks, which also
+// defeats symlinks pointing outside.
+//
+// tokens.css and branding.json are special: index.html links the former and
+// the app always fetches the latter, so when the dir or the file is absent
+// they answer 200 with an empty text/css body and the empty JSON object
+// respectively — the console stays clean and the app keeps its defaults.
+// Every other absent name answers 404 (never the SPA fallback, which would
+// hand the app's loadBranding an HTML document).
+func serveBranding(dir string, w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	name, under := strings.CutPrefix(r.URL.Path, "/branding/")
+	if !under || name == "" || hasDotDotSegment(name) {
+		http.NotFound(w, r) // /branding, the bare listing, or traversal
+		return
+	}
+	if !brandingNameAllowed(name) {
+		http.NotFound(w, r) // only the documented names are served (TM-05)
+		return
+	}
+	full := brandingFile(dir, name)
+	if full == "" {
+		switch name {
+		case "tokens.css":
+			w.Header().Set("Content-Type", "text/css")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.WriteHeader(http.StatusOK)
+		case "branding.json":
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "no-cache")
+			if r.Method != http.MethodHead {
+				_, _ = w.Write([]byte("{}\n"))
+			}
+		default:
+			http.NotFound(w, r)
+		}
+		return
+	}
+	serveBrandingFile(full, w, r)
+}
+
+// brandingFile returns the fully-resolved path of the regular file name in
+// the branding directory, or "" when there is no such file or it is not
+// provably inside the directory.
+func brandingFile(dir, name string) string {
+	if dir == "" || hasDotDotSegment(name) {
+		return ""
+	}
+	root, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return ""
+	}
+	resolved, err := filepath.EvalSymlinks(filepath.Join(dir, name))
+	if err != nil || !strings.HasPrefix(resolved, root+string(filepath.Separator)) {
+		return ""
+	}
+	if st, err := os.Stat(resolved); err != nil || !st.Mode().IsRegular() {
+		return ""
+	}
+	return resolved
+}
+
+// serveBrandingFile serves a path brandingFile resolved, no-cache.
+func serveBrandingFile(full string, w http.ResponseWriter, r *http.Request) {
+	f, err := os.Open(full) // #nosec G304 -- resolved path proven inside -branding-dir by brandingFile
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-cache")
+	// ServeContent (not ServeFile): the request URL is the branding path,
+	// not the file's, so no "/index.html" redirect or second ".." check
+	// can trigger.
+	http.ServeContent(w, r, filepath.Base(full), st.ModTime(), f)
+}
+
+// hasDotDotSegment reports whether p contains a literal ".." path segment
+// (the URL path is already percent-decoded, so %2e%2e lands here as "..").
+func hasDotDotSegment(p string) bool {
+	for _, seg := range strings.Split(p, "/") {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+// serveIndex writes index.html without http.ServeFile's redirect of
+// ".../index.html" to "./", so every SPA route answers 200 in place.
+func serveIndex(w http.ResponseWriter, r *http.Request, path string) {
+	f, err := os.Open(path) // #nosec G304 -- fixed file under the configured web root
+	if err != nil {
+		http.Error(w, "index unavailable", http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		http.Error(w, "index unavailable", http.StatusInternalServerError)
+		return
+	}
+	http.ServeContent(w, r, "index.html", st.ModTime(), f)
+}
+
+// newTLSServer builds the frontend listener with certificate hot-reload
+// (D21): the reloader re-reads certFile/keyFile when they change and
+// TLSConfig.GetCertificate hands out the newest pair, so a rotated Secret
+// takes effect on the next handshake without a restart. It also fails
+// startup here if the pair is unusable. Callers run reloader.Run until
+// shutdown; ServeTLS/ListenAndServeTLS are then called with empty
+// cert/key paths.
+func newTLSServer(addr, certFile, keyFile string, h http.Handler, opts ...tlsreload.Option) (*http.Server, *tlsreload.Reloader, error) {
+	r, err := tlsreload.New(certFile, keyFile, opts...)
+	if err != nil {
+		return nil, nil, err
+	}
+	srv := newServer(addr, h)
+	srv.TLSConfig.GetCertificate = r.GetCertificate
+	return srv, r, nil
+}
+
+// newServer builds the frontend listener (SEC-23): all request phases are
+// bounded — this server only serves static files, so full read/write
+// timeouts are safe (no WebSockets, no proxying).
+func newServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      120 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12},
+	}
+}

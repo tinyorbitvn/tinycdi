@@ -1,0 +1,270 @@
+// Workspace-area strings: list, detail, create, delete, connect and the
+// template catalog. Owned by T3.5 after T3.3 seeds it; append-only.
+export default {
+  "templates.catalog.title": "Template catalog",
+  "templates.catalog.loading": "Loading catalog…",
+  "templates.catalog.empty": "No templates published.",
+  "templates.catalog.field.runtime": "Runtime",
+  "templates.catalog.field.experience": "Experience",
+  "templates.catalog.field.resources": "Resources",
+  "templates.catalog.field.dataPolicy": "Data policy default",
+  "templates.catalog.field.clipboard": "Clipboard",
+  "templates.catalog.field.network": "Network",
+  "templates.catalog.field.idleTimeout": "Idle timeout",
+  "templates.catalog.create": "Create workspace",
+  "templates.catalog.stale.badge": "Stale image",
+  "templates.catalog.stale.hint":
+    "The runtime image was built {date} — older than the freshness window. The workspace still starts; ask an administrator about a refresh.",
+  "templates.catalog.blocked.badge": "Image blocked",
+  "templates.catalog.blocked.hint":
+    "The runtime image was built {date} — older than the freshness limit. Workspaces cannot be created from it; ask an administrator about a refresh.",
+
+  "templates.runtime.linuxContainer": "Linux container",
+  "templates.runtime.windowsVm": "Windows VM",
+  "templates.experience.desktop": "Desktop",
+  "templates.experience.browser": "Browser",
+  "templates.network.internetOnly.label": "Internet only",
+  "templates.network.internetOnly.description": "full Internet egress",
+  "templates.network.clusterOnly.label": "Cluster only",
+  "templates.network.clusterOnly.description": "in-cluster destinations only",
+  "templates.network.isolated.label": "Isolated",
+  "templates.network.isolated.description": "no egress except cluster DNS",
+  "templates.dataPolicy.retain.label": "Retain",
+  "templates.dataPolicy.retain.description":
+    "the disk is kept when the workspace stops or is deleted",
+  "templates.dataPolicy.ephemeral.label": "Ephemeral",
+  "templates.dataPolicy.ephemeral.description":
+    "the disk is destroyed when the workspace stops or is deleted",
+  "templates.clipboard.disabled": "Disabled",
+  "templates.clipboard.send": "Send only",
+  "templates.clipboard.receive": "Receive only",
+  "templates.clipboard.bidirectional": "Both directions",
+  "templates.format.cpu": "{n} vCPU",
+  "templates.format.gib": "{n} GiB",
+  "templates.format.mib": "{n} MiB",
+  "templates.format.resources": "{cpu} · {memory} RAM · {storage} disk",
+  "templates.format.duration.none": "No timeout",
+  "templates.format.duration.m": "{m} min",
+  "templates.format.duration.h": "{h} h",
+  "templates.format.duration.hm": "{h} h {m} min",
+  "templates.format.duration.s": "{n} s",
+
+  "workspaces.list.title": "Workspaces",
+  "workspaces.list.loading": "Loading…",
+  "workspaces.list.empty": "No workspaces yet.",
+  "workspaces.list.emptyBody":
+    "Workspaces are created from a template — a desktop or app that opens in your browser.",
+  "workspaces.list.emptyCta": "Browse the template catalog",
+  "workspaces.list.label": "workspaces",
+  "workspaces.list.count": "{n} workspaces",
+  "workspaces.list.col.name": "Name",
+  "workspaces.list.col.template": "Template",
+  "workspaces.list.col.phase": "Phase",
+  "workspaces.list.col.desired": "Desired",
+  "workspaces.list.col.dataPolicy": "Data policy",
+  "workspaces.list.waitingConnection": "(waiting for ConnectionReady)",
+  "workspaces.list.manage": "Manage",
+
+  "workspaces.desired.running": "Running",
+  "workspaces.desired.stopped": "Stopped",
+
+  "workspaces.phase.pending": "Queued",
+  "workspaces.phase.provisioning": "Starting",
+  "workspaces.phase.ready": "Ready",
+  "workspaces.phase.stopping": "Stopping",
+  "workspaces.phase.stopped": "Stopped",
+  "workspaces.phase.failed": "Failed",
+  "workspaces.phase.terminating": "Deleting",
+
+  "workspaces.detail.loading": "Loading workspace…",
+  "workspaces.detail.field.id": "ID",
+  "workspaces.detail.field.template": "Template",
+  "workspaces.detail.field.owner": "Owner",
+  "workspaces.detail.field.networkProfile": "Network profile",
+  "workspaces.detail.field.imageBuilt": "Image built",
+  "workspaces.detail.template": "{name}@{revision} ({runtime} / {experience})",
+  "workspaces.detail.templateNoRevision": "{name} ({runtime} / {experience})",
+  "workspaces.detail.field.dataDisk": "Data disk",
+  "workspaces.detail.dataDisk.retained": "Retained disk from {source} ({id})",
+  "workspaces.detail.field.desired": "Desired state",
+  "workspaces.detail.field.dataPolicy": "Data policy",
+  "workspaces.detail.field.failure": "Failure",
+  "workspaces.detail.field.created": "Created",
+  "workspaces.detail.field.updated": "Updated",
+  "workspaces.detail.conditions.title": "Conditions",
+  "workspaces.detail.action.start": "Start",
+  "workspaces.detail.action.starting": "Starting…",
+  "workspaces.detail.action.retryStart": "Retry start",
+  "workspaces.detail.action.stop": "Stop",
+  "workspaces.detail.action.stopping": "Stopping…",
+  "workspaces.detail.connectStatus": "connect status",
+  "workspaces.detail.connectUnavailable": "Connect unavailable: {reason}",
+  "workspaces.detail.adminContext":
+    "This workspace belongs to {owner}. You are acting on it as a tenant administrator; Connect is only available to the owner.",
+  "workspaces.detail.blocker.stopped": "desired state is Stopped",
+  "workspaces.detail.blocker.connectionReady":
+    "ConnectionReady={status} ({reason})",
+  "workspaces.detail.blocker.noConnection":
+    "no ConnectionReady condition reported yet",
+  "workspaces.detail.stale.badge": "Stale image",
+  "workspaces.detail.stale.body":
+    "The runtime image was built {date} — older than the freshness window. The workspace still runs; ask an administrator about a refresh.",
+  "workspaces.detail.stale.bodyUnknown":
+    "The runtime image is older than the freshness window (build date unknown). The workspace still runs; ask an administrator about a refresh.",
+  "workspaces.detail.update.title": "Update available",
+  "workspaces.detail.failed.unrecoverable": "Starting again would fail the same way. Ask your administrator to fix the cause, or delete this workspace.",
+  "workspaces.detail.update.body":
+    "Starts on the updated image — a newer revision of this template is published.",
+  "workspaces.detail.events.title": "Events",
+  "workspaces.detail.events.empty": "No events recorded yet.",
+  "workspaces.detail.events.count": "×{n}",
+  "workspaces.detail.events.type.normal": "Normal",
+  "workspaces.detail.events.type.warning": "Warning",
+
+  "workspaces.conditions.label": "conditions",
+  "workspaces.conditions.empty": "No conditions reported yet.",
+  "workspaces.conditions.col.type": "Type",
+  "workspaces.conditions.col.status": "Status",
+  "workspaces.conditions.col.reason": "Reason",
+  "workspaces.conditions.col.message": "Message",
+  "workspaces.conditions.col.since": "Since",
+
+  "workspaces.create.title": "New workspace",
+  "workspaces.create.loading": "Loading templates…",
+  "workspaces.create.nameLabel": "Name",
+  "workspaces.create.namePlaceholder": "research-desktop",
+  "workspaces.create.templateLabel": "Template",
+  "workspaces.create.templatePlaceholder": "Select a template",
+  "workspaces.create.templateOption": "{name} (rev {revision}, {runtime})",
+  "workspaces.create.templateOptionNoRevision": "{name} ({runtime})",
+  "workspaces.create.dataPolicyLabel": "Data policy",
+  "workspaces.create.dataPolicyDefault": "Template default",
+  "workspaces.create.dataPolicyDefaultNamed": "Template default ({policy})",
+  "workspaces.create.dataPolicyRetain": "Retain — keep disk on stop/delete",
+  "workspaces.create.dataPolicyEphemeral":
+    "Ephemeral — destroy data on stop/delete",
+  "workspaces.create.blocked.title": "Image too old",
+  "workspaces.create.blocked.body":
+    "This template's runtime image is older than the freshness limit — workspaces cannot be created from it. Ask an administrator about a refresh.",
+  "workspaces.create.startNow": "Start immediately",
+  "workspaces.create.network": "Network profile: {profile}",
+  "workspaces.create.ephemeral.title": "Data is not kept",
+  "workspaces.create.ephemeral.body":
+    "This template is Ephemeral: stopping or deleting the workspace destroys the disk. Pick Retain above if you need to keep it.",
+  "workspaces.create.submit": "Create workspace",
+  "workspaces.create.submitting": "Creating…",
+
+  "workspaces.delete.action": "Delete",
+  "workspaces.delete.title": "Delete {name}?",
+  "workspaces.delete.confirm":
+    "Delete {name}? Access is revoked and the runtime is removed.",
+  "workspaces.delete.dataRetain":
+    "Its disk moves to the retained inventory — it is not destroyed here (use Purge on the Retained data page for that).",
+  "workspaces.delete.dataEphemeral":
+    "Its data is Ephemeral and will be destroyed.",
+  "workspaces.delete.confirmButton": "Confirm delete",
+  "workspaces.delete.confirming": "Deleting…",
+
+  "workspaces.connect.action": "Connect",
+  "workspaces.connect.disabledStarting": "Starting…",
+  "workspaces.connect.disabledFailed": "Failed",
+  "workspaces.connect.disabledFinishing": "Finishing the connection…",
+
+  // Reason-token text for events and conditions (V3.14b): rendered in
+  // place of the server's English message; the message stays as secondary
+  // detail when it carries extra detail.
+  "workspaces.reason.created": "The workspace was created.",
+  "workspaces.reason.startRequested": "Starting the workspace was requested.",
+  "workspaces.reason.stopRequested": "Stopping the workspace was requested.",
+  "workspaces.reason.maxDurationReached":
+    "The workspace reached its maximum running time and was stopped.",
+  "workspaces.reason.deleteRequested": "Deleting the workspace was requested.",
+  "workspaces.reason.templateUpdateSkipped":
+    "The workspace stayed on its recorded template revision {revision} ({skipReason}).",
+  "workspaces.reason.admitted": "The platform accepted the workspace request.",
+  "workspaces.reason.templateResolved": "The template snapshot was recorded.",
+  "workspaces.reason.templateNotFound": "The recorded template could not be found.",
+  "workspaces.reason.templateRejected":
+    "The platform refused the template's runtime configuration.",
+  "workspaces.reason.templateSnapshotInvalid":
+    "The recorded template snapshot failed verification; ask an administrator.",
+  "workspaces.reason.templateInvalid":
+    "The workspace's template could not be established; ask an administrator.",
+  "workspaces.reason.templateRevisionGone":
+    "The workspace's recorded template revision is unavailable; the session keeps running — restart the workspace to re-snapshot.",
+  "workspaces.reason.intentApplied": "The requested change was applied.",
+  "workspaces.reason.quotaReserved":
+    "Capacity reserved: {cpuMillicores}, {memoryMiB} memory, {storageGiB} storage.",
+  "workspaces.reason.provisioning": "The platform is setting the workspace up.",
+  "workspaces.reason.waitingForDisk":
+    "Waiting for the retained disk to be handed over to this workspace.",
+  "workspaces.reason.volumeBound": "The workspace's storage was attached ({sizeGiB}).",
+  "workspaces.reason.ready": "This step is ready.",
+  "workspaces.reason.runtimeUp": "The runtime is up.",
+  "workspaces.reason.streamEndpointUp": "The streaming endpoint is up.",
+  "workspaces.reason.stopped": "The workspace is stopped.",
+  "workspaces.reason.runtimeStopped": "The runtime is not running.",
+  "workspaces.reason.terminating": "The workspace is being deleted.",
+  "workspaces.reason.nameConflict": "A runtime object with the same name already exists.",
+  "workspaces.reason.bootDeadlineExceeded":
+    "The workspace didn't become ready in time.",
+  "workspaces.reason.backendError":
+    "The platform couldn't complete a runtime step; it's retrying.",
+  "workspaces.reason.nominal": "The workspace reports no problems.",
+  "workspaces.reason.retainedClaimMissing":
+    "The retained disk reference is missing; the workspace can't start.",
+  "workspaces.reason.idleTimeout": "Stopped because the idle timeout passed.",
+  "workspaces.reason.disconnectTimeout": "Stopped after the disconnect grace window.",
+  "workspaces.reason.maxDuration": "Stopped at the maximum running time.",
+  "workspaces.reason.streamDraining": "Waiting for open sessions to close.",
+  "workspaces.reason.drainTimedOut":
+    "Open sessions did not close inside the {budgetSeconds} budget; teardown continues.",
+  "workspaces.reason.retentionPending":
+    "The retention step hasn't finished; teardown waits.",
+  "workspaces.reason.cleanupRetry": "Teardown step {step} is blocked; retrying.",
+  "workspaces.reason.failedCleanup": "The failed incarnation is being torn down.",
+  "workspaces.reason.runtimeLost": "The desktop stopped unexpectedly (its container was removed or failed). Start it again to recover; your home folder is kept.",
+  "workspaces.reason.imagePolicyDenied": "The desktop image was refused by a cluster policy.",
+  "workspaces.reason.homeVolumeLost": "The home disk of this workspace no longer exists.",
+  "workspaces.reason.missingWorkspaceID":
+    "The workspace record is missing its platform ID; teardown is held.",
+  "workspaces.reason.intentBehind":
+    "The platform's intent stream is behind this workspace (stream revision {rowRevision}, workspace revision {crRevision}); new actions are held until it is realigned — contact an administrator.",
+  "workspaces.reason.blockingConnects": "Blocking new connections.",
+  "workspaces.reason.revokingLeases": "Revoking session leases.",
+  "workspaces.reason.drainingStreams": "Closing open sessions.",
+  "workspaces.reason.stoppingRuntime": "Stopping the runtime.",
+  "workspaces.reason.applyingRetention": "Applying the data policy.",
+  "workspaces.reason.cleaningUp": "Removing the remaining objects.",
+  "workspaces.reason.unschedulable": "No machine has room for it right now.",
+  "workspaces.reason.preparingPod": "Preparing the pod sandbox.",
+  "workspaces.reason.pullingImage": "Downloading the runtime image.",
+  "workspaces.reason.containerCreating": "Creating the container.",
+  "workspaces.reason.podInitializing": "An init container is running.",
+  "workspaces.reason.notReady": "The container is up; the readiness check hasn't passed.",
+  "workspaces.reason.waitingForEndpoint": "The desktop is up; the cluster is routing connections to it.",
+  "workspaces.reason.imagePull": "The runtime image couldn't be downloaded.",
+  "workspaces.reason.crashLoopBackOff": "The container keeps restarting.",
+  "workspaces.reason.createContainerConfigError": "The container config is invalid.",
+  "workspaces.reason.podFailed": "The pod failed.",
+  "workspaces.reason.podExited": "The container exited.",
+  "workspaces.reason.statusStale":
+    "The reported state is stale; showing the last known state.",
+  "workspaces.reason.unknown": "The workspace reported a status change.",
+  "workspaces.reason.sessionStarted": "An interactive session started.",
+  "workspaces.reason.sessionTakenOver": "An interactive session was taken over.",
+  "workspaces.reason.guestAgentUnreachable": "The guest agent is unreachable.",
+
+  // Localized values for reason `params` (B3-PARAMS): machine tokens the
+  // server sends structured so they never need parsing out of English.
+  "workspaces.reason.param.step.blockConnects": "connection blocking",
+  "workspaces.reason.param.step.revokeLeases": "lease revocation",
+  "workspaces.reason.param.step.drainStreams": "stream draining",
+  "workspaces.reason.param.step.stopRuntime": "runtime stop",
+  "workspaces.reason.param.step.retention": "retention",
+  "workspaces.reason.param.step.cleanup": "cleanup",
+  "workspaces.reason.param.skipReason.runtimeChanged": "runtime changed",
+  "workspaces.reason.param.skipReason.experienceChanged": "experience changed",
+  "workspaces.reason.param.skipReason.dataPolicyChanged": "data policy changed",
+  "workspaces.reason.param.skipReason.storageSmaller": "smaller storage",
+} as const;

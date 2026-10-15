@@ -1,0 +1,280 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TinyCDI soak report",
+  "description": "Output of tests/soak/soak.ts — one file per soak run (soak-report.json).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "run", "thresholds", "sessions", "summary"],
+  "properties": {
+    "version": { "const": 1 },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tool",
+        "dryRun",
+        "startedAt",
+        "endedAt",
+        "durationSeconds",
+        "requestedDurationSeconds",
+        "sessionsRequested",
+        "inputIntervalSeconds",
+        "pollIntervalSeconds"
+      ],
+      "properties": {
+        "tool": { "const": "tinycdi-soak" },
+        "dryRun": { "type": "boolean" },
+        "portalOrigin": {
+          "type": "string",
+          "description": "Origin (scheme://host[:port]) the soak ran against; never carries credentials."
+        },
+        "template": { "type": "string", "description": "Template id or name used for workspaces." },
+        "startedAt": { "type": "string", "format": "date-time" },
+        "endedAt": { "type": "string", "format": "date-time" },
+        "durationSeconds": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Wall-clock length of the whole run, login and workspace creation included."
+        },
+        "soakStartedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the soak clock started: the last session's first connected observation. Absent when the soak never started."
+        },
+        "requestedDurationSeconds": {
+          "type": "number",
+          "minimum": 0,
+          "description": "The soak duration that was asked for, counted from soakStartedAt; a run that ends sooner is truncated and fails."
+        },
+        "sessionsRequested": { "type": "integer", "minimum": 0 },
+        "sessionsEffective": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Sessions actually created; lower than sessionsRequested when a lane was skipped."
+        },
+        "skippedLanes": {
+          "type": "array",
+          "description": "Lanes that exhausted their login attempts and were skipped (advisor skip-lane rule); their share of sessions was dropped.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["user", "error"],
+            "properties": {
+              "user": { "type": "string" },
+              "error": { "type": "string" }
+            }
+          }
+        },
+        "lanes": {
+          "type": "array",
+          "description": "Per-lane tallies for the run.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["user", "rateLimited429", "skipped"],
+            "properties": {
+              "user": { "type": "string" },
+              "rateLimited429": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "HTTP 429 (rate limited) responses seen on the lane's page traffic and API calls."
+              },
+              "skipped": { "type": "boolean" }
+            }
+          }
+        },
+        "users": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Distinct soak users the sessions were spread over (SOAK_USERS_FILE lanes)."
+        },
+        "inputIntervalSeconds": { "type": "number", "exclusiveMinimum": 0 },
+        "pollIntervalSeconds": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxManualActions", "maxDroppedSessions"],
+      "properties": {
+        "connectP95Ms": { "type": ["number", "null"], "minimum": 0 },
+        "reconnectP95Ms": { "type": ["number", "null"], "minimum": 0 },
+        "maxGapMs": { "type": ["number", "null"], "minimum": 0 },
+        "disconnectP95Ms": { "type": ["number", "null"], "minimum": 0 },
+        "disconnectP100Ms": { "type": ["number", "null"], "minimum": 0 },
+        "inputResumeP100Ms": { "type": ["number", "null"], "minimum": 0 },
+        "maxManualActions": { "type": "integer", "minimum": 0 },
+        "maxDroppedSessions": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "sessions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "workspaceId",
+          "connectMs",
+          "reconnectMs",
+          "seamless",
+          "reloadEvidence",
+          "longestGapMs",
+          "nonConnectedStates",
+          "elsewhereTransitions",
+          "manualActions",
+          "inputEvents",
+          "dropped"
+        ],
+        "properties": {
+          "workspaceId": { "type": "string" },
+          "workspaceName": { "type": "string" },
+          "owner": {
+            "type": "string",
+            "description": "Soak user (lane) that owns this session; present in multi-user runs."
+          },
+          "connectMs": {
+            "type": ["number", "null"],
+            "minimum": 0,
+            "description": "Launch click to first connected observation; null if never connected."
+          },
+          "reconnectMs": {
+            "type": ["number", "null"],
+            "minimum": 0,
+            "description": "Mid-run reload: first non-connected observation within 60 s after the reload to the next connected one; 0 when the reload was seamless; null if not reloaded or the session was lost after the reload and never reconnected."
+          },
+          "seamless": {
+            "type": "boolean",
+            "description": "True when the mid-run reload was observed within 60 s and showed no non-connected state. A later gap (a drill) is not attributed to the reload. False when not reloaded or when nothing was observed inside the window (backlog 4: zero observations is never seamless)."
+          },
+          "reloadEvidence": {
+            "type": ["string", "null"],
+            "enum": ["observed", "none", null],
+            "description": "Evidence behind the reload check: 'observed' when at least one observation landed inside the 60 s post-reload window, 'none' when it was empty — an explicit no-evidence verdict that fails the run's reload check (backlog 4). null when the session was never reloaded."
+          },
+          "longestGapMs": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Longest continuous time observed in a state other than connected, after first connect."
+          },
+          "nonConnectedStates": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["state", "startedAt", "durationMs"],
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "enum": ["none", "disconnected", "stale", "error"],
+                  "description": "ConnectionStatus.state; 'error' marks a failed status poll in the harness itself."
+                },
+                "source": { "type": "string", "enum": ["api", "probe"] },
+                "startedAt": { "type": "string", "format": "date-time" },
+                "endedAt": { "type": "string", "format": "date-time" },
+                "durationMs": { "type": "number", "minimum": 0 }
+              }
+            }
+          },
+          "elsewhereTransitions": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Times the session page flipped to its 'open in another tab' view while the harness held the only stream. Always a false transition; counted for the V3.10 watch item."
+          },
+          "manualActions": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Recovery actions outside the automatic flow the harness had to take."
+          },
+          "inputEvents": { "type": "integer", "minimum": 0 },
+          "inputTimeouts": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Input dispatches that hit the per-input timeout (the page's ops were wedged)."
+          },
+          "dropped": {
+            "type": "boolean",
+            "description": "Session was lost and could not be recovered by the harness."
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "connectMs",
+        "reconnectMs",
+        "inputDispatchMs",
+        "disconnectMs",
+        "inputResumeMs",
+        "sessionsWithManualActions",
+        "droppedSessions",
+        "falseElsewhereTransitions",
+        "pass",
+        "failures"
+      ],
+      "properties": {
+        "connectMs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["p50", "p95"],
+          "properties": {
+            "p50": { "type": ["number", "null"] },
+            "p95": { "type": ["number", "null"] }
+          }
+        },
+        "reconnectMs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["p50", "p95"],
+          "properties": {
+            "p50": { "type": ["number", "null"] },
+            "p95": { "type": ["number", "null"] }
+          }
+        },
+        "inputDispatchMs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["p50", "p95"],
+          "properties": {
+            "p50": { "type": ["number", "null"] },
+            "p95": { "type": ["number", "null"] }
+          },
+          "description": "Wall-clock percentiles of scripted input dispatch through the driver (harness-side latency, not glass-to-glass)."
+        },
+        "inputTimeouts": { "type": "integer", "minimum": 0 },
+        "disconnectMs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["p50", "p95", "p100"],
+          "properties": {
+            "p50": { "type": ["number", "null"] },
+            "p95": { "type": ["number", "null"] },
+            "p100": { "type": ["number", "null"] }
+          },
+          "description": "Non-connected span durations that start after first connect — the reconnect latency users feel around drills."
+        },
+        "inputResumeMs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["p50", "p95", "p100"],
+          "properties": {
+            "p50": { "type": ["number", "null"] },
+            "p95": { "type": ["number", "null"] },
+            "p100": { "type": ["number", "null"] }
+          },
+          "description": "Disconnect start to first successful scripted input after reconnect (harness-side usability)."
+        },
+        "sessionsWithManualActions": { "type": "integer", "minimum": 0 },
+        "droppedSessions": { "type": "integer", "minimum": 0 },
+        "falseElsewhereTransitions": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Sum of per-session elsewhere transitions; the harness owns every tab, so each one is false."
+        },
+        "pass": { "type": "boolean" },
+        "failures": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

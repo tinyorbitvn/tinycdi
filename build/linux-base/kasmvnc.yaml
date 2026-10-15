@@ -1,0 +1,94 @@
+# System-wide KasmVNC policy for the workspace runtime image.
+# Loaded before $HOME/.vnc/kasmvnc.yaml - the entrypoint owns that per-user
+# file and rewrites it every boot so a stale file on the persistent home
+# volume can never override this policy.
+# Schema: /usr/share/kasmvnc/kasmvnc_defaults.yaml (KasmVNC 1.5.0).
+desktop:
+  resolution:
+    width: 1280
+    height: 800
+  allow_resize: true
+  pixel_depth: 24
+  gpu:
+    hw3d: false
+
+network:
+  protocol: http
+  # KasmVNC listens on loopback only: tcdi-xferd owns the pod's :8443 and
+  # reverse-proxies the desktop here (ADR 0009 §5 (i)). Streaming is
+  # websocket-only over HTTPS (no HTTP tunnel fallback in KasmVNC 1.5.0).
+  interface: 127.0.0.1
+  websocket_port: 8444
+  use_ipv4: true
+  use_ipv6: false
+  ssl:
+    pem_certificate: /run/tcdi/tls.crt
+    pem_key: /run/tcdi/tls.key
+    require_ssl: true
+
+command_line:
+  prompt: false
+
+# Clipboard DLP system floor: both directions off. The workspace's
+# spec.clipboardPolicy reaches the pod as TCDI_CLIPBOARD_POLICY and the
+# entrypoint renders the real block into $HOME/.vnc/kasmvnc.yaml, which
+# merges after this file and wins for the keys it sets — so the values
+# below are only the fail-closed default when the env is absent or
+# unreadable. Client-side overrides are disabled, and
+# runtime_configuration below leaves no VNC parameter
+# runtime-overridable, so neither the browser nor an X client inside the
+# session can re-enable the clipboard after start.
+data_loss_prevention:
+  clipboard:
+    server_to_client:
+      enabled: false
+      primary_clipboard_enabled: false
+    client_to_server:
+      enabled: false
+  logging:
+    # "verbose" logs keypresses and clipboard contents - keep off.
+    level: off
+
+# The launcher passes Xvnc an -AllowOverride list ONLY when
+# allow_override_standard_vnc_server_settings is true. With false it passes
+# none, and Xvnc's compiled default lets any X client in the session flip
+# SendCutText/AcceptCutText/SendPrimary/SetPrimary with vncconfig. true plus
+# an empty list renders -AllowOverride "": no parameter is runtime-settable.
+runtime_configuration:
+  allow_client_to_override_kasm_server_settings: false
+  allow_override_standard_vnc_server_settings: true
+  allow_override_list: []
+
+user_session:
+  new_session_disconnects_existing_exclusive_session: true
+  concurrent_connections_prompt: false
+
+server:
+  http:
+    headers:
+      - Cross-Origin-Embedder-Policy=require-corp
+      - Cross-Origin-Opener-Policy=same-origin
+    httpd_directory: /usr/share/kasmvnc/www
+  advanced:
+    # The real password file lives on the ephemeral /run/tcdi mount; the
+    # entrypoint symlinks $HOME/.kasmpasswd here for the launcher's
+    # "any users configured" check. Auth is Basic-over-HTTPS against this
+    # file; the only account is a write-only (non-owner) user, so the
+    # owner-gated management/API routes (/api/*) deny all requests.
+    kasm_password_file: /run/tcdi/kasmpasswd
+  auto_shutdown:
+    no_user_session_timeout: never
+    active_user_session_timeout: never
+    inactive_user_session_timeout: never
+  # KasmVNC config keys must never be re-settable via container env vars.
+  allow_environment_variables_to_override_config_settings: false
+
+security:
+  brute_force_protection:
+    blacklist_threshold: 5
+    blacklist_timeout: 10
+
+logging:
+  log_writer_name: all
+  log_dest: logfile
+  level: 30

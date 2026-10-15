@@ -1,0 +1,75 @@
+/* Admin area styles on Orbit tokens (--tc-* from styles/tokens.css).
+   Loaded with the admin route module only. */
+
+/* The section switcher is the design-system Tabs component; space below. */
+.tc-admin-tabs {
+  margin-bottom: var(--tc-space-6);
+}
+
+.tc-admin-muted {
+  color: var(--tc-color-text-muted);
+}
+
+.tc-admin-stat {
+  display: flex;
+  flex-direction: column;
+  gap: var(--tc-space-2);
+}
+
+.tc-admin-stat__value {
+  font-size: var(--tc-text-2xl);
+  font-weight: var(--tc-weight-semibold);
+  line-height: var(--tc-leading-tight);
+}
+
+.tc-admin-cell-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--tc-space-1);
+  min-width: 0;
+}
+
+.tc-admin-cell-stack code {
+  font-family: var(--tc-font-mono);
+  font-size: var(--tc-text-xs);
+}
+
+.tc-admin-usage {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--tc-space-2);
+}
+
+.tc-admin-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--tc-space-1);
+}
+
+.tc-admin-toolbar {
+  margin-block-end: var(--tc-space-4);
+}
+
+.tc-admin-list {
+  margin: 0;
+  padding-inline-start: var(--tc-space-5);
+}
+
+.tc-admin-list li + li {
+  margin-top: var(--tc-space-1);
+}
+
+.tc-admin-policy-fields {
+  display: grid;
+  gap: var(--tc-space-4);
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 24rem));
+  margin-block: var(--tc-space-4);
+}
+
+.tc-admin-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--tc-space-3);
+  margin-block-end: var(--tc-space-4);
+}

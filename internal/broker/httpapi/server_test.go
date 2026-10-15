@@ -1,0 +1,1059 @@
+package httpapi_test
+
+// Contract tests for the internal gateway↔broker mTLS API (ADR 0003):
+// identity from the verified client cert, the fixed route/error table, and
+// the rule that ticket/secret material never crosses into logs.
+
+import (
+	"bytes"
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"io"
+	"log/slog"
+	"math/big"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/tinyorbitvn/tinycdi/internal/broker"
+	"github.com/tinyorbitvn/tinycdi/internal/broker/httpapi"
+	"github.com/tinyorbitvn/tinycdi/internal/observability"
+)
+
+// fakeBroker scripts the broker surface; err maps let tests inject the
+// domain errors the handler must translate.
+type fakeBroker struct {
+	redeemLease   broker.Lease
+	redeemErr     error
+	renewLease    broker.Lease
+	renewErr      error
+	target        broker.Target
+	targetErr     error
+	revokeErr     error
+	revokeChanged bool
+
+	activityErr   error
+	revokedLeases int
+	revokeWsErr   error
+	openStreams   int
+	drained       bool
+	drainErr      error
+
+	gotGW      broker.GatewayIdentity
+	gotTicket  string
+	gotFence   broker.Fence
+	gotLeaseID string
+	gotEvent   broker.ActivityEvent
+	gotWsUID   broker.PlatformID
+	gotWsGen   uint64
+
+	grant         broker.TransferGrant
+	transferErr   error
+	gotTransferID string
+	gotMethod     string
+	gotBytes      int64
+	gotOK         bool
+}
+
+func (f *fakeBroker) RedeemTicket(_ context.Context, gw broker.GatewayIdentity, opaque string) (broker.Lease, error) {
+	f.gotGW, f.gotTicket = gw, opaque
+	return f.redeemLease, f.redeemErr
+}
+
+func (f *fakeBroker) RenewLease(_ context.Context, gw broker.GatewayIdentity, leaseID string, fence broker.Fence) (broker.Lease, error) {
+	f.gotGW, f.gotLeaseID, f.gotFence = gw, leaseID, fence
+	return f.renewLease, f.renewErr
+}
+
+func (f *fakeBroker) ResolveTarget(_ context.Context, gw broker.GatewayIdentity, leaseID string) (broker.Target, error) {
+	f.gotGW, f.gotLeaseID = gw, leaseID
+	return f.target, f.targetErr
+}
+
+func (f *fakeBroker) ClaimTransfer(_ context.Context, gw broker.GatewayIdentity, leaseID, transferID, method string) (broker.TransferGrant, error) {
+	f.gotGW, f.gotLeaseID, f.gotTransferID, f.gotMethod = gw, leaseID, transferID, method
+	return f.grant, f.transferErr
+}
+
+func (f *fakeBroker) CompleteTransfer(_ context.Context, gw broker.GatewayIdentity, leaseID, transferID string, bytesDone int64, ok bool) error {
+	f.gotGW, f.gotLeaseID, f.gotTransferID, f.gotBytes, f.gotOK = gw, leaseID, transferID, bytesDone, ok
+	return f.transferErr
+}
+
+func (f *fakeBroker) RevokeLease(_ context.Context, leaseID string) error {
+	f.gotLeaseID = leaseID
+	return f.revokeErr
+}
+
+func (f *fakeBroker) RevokeLeaseChanged(_ context.Context, leaseID string) (bool, error) {
+	f.gotLeaseID = leaseID
+	return f.revokeChanged, f.revokeErr
+}
+
+func (f *fakeBroker) ReportActivity(_ context.Context, gw broker.GatewayIdentity, leaseID string, fence broker.Fence, ev broker.ActivityEvent) error {
+	f.gotGW, f.gotLeaseID, f.gotFence, f.gotEvent = gw, leaseID, fence, ev
+	return f.activityErr
+}
+
+func (f *fakeBroker) RevokeWorkspaceLeases(_ context.Context, wsUID broker.PlatformID, gen uint64) (int, error) {
+	f.gotWsUID, f.gotWsGen = wsUID, gen
+	return f.revokedLeases, f.revokeWsErr
+}
+
+func (f *fakeBroker) DrainStatus(_ context.Context, wsUID broker.PlatformID) (int, bool, error) {
+	f.gotWsUID = wsUID
+	return f.openStreams, f.drained, f.drainErr
+}
+
+// pki is a scratch CA + cert factory for the mTLS fixture.
+type pki struct {
+	caCert *x509.Certificate
+	caKey  *ecdsa.PrivateKey
+	pool   *x509.CertPool
+}
+
+func newPKI(t *testing.T) *pki {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	tmpl := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: "test-internal-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(cert)
+	return &pki{caCert: cert, caKey: key, pool: pool}
+}
+
+func (p *pki) issue(t *testing.T, cn string, uriSANs []string, server bool) tls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	tmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: cn},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+	}
+	if server {
+		tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+		tmpl.DNSNames = []string{"127.0.0.1", "localhost"}
+		tmpl.IPAddresses = []net.IP{net.ParseIP("127.0.0.1")}
+	} else {
+		tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
+		for _, u := range uriSANs {
+			parsed, err := url.Parse(u)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tmpl.URIs = append(tmpl.URIs, parsed)
+		}
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, p.caCert, &key.PublicKey, p.caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := tls.X509KeyPair(
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cert
+}
+
+// env wires the mTLS test server + a client factory.
+type env struct {
+	srv   *httptest.Server
+	caPEM []byte
+	pki   *pki
+	fb    *fakeBroker
+	logs  *bytes.Buffer
+}
+
+func newEnv(t *testing.T, fb *fakeBroker, tweaks ...func(*httpapi.Config)) *env {
+	t.Helper()
+	p := newPKI(t)
+	logs := &bytes.Buffer{}
+	cfg := httpapi.Config{
+		Broker:     fb,
+		Audience:   "session.example.dev",
+		GatewayCNs: []string{"gw-1"},
+		Logger:     slog.New(slog.NewJSONHandler(logs, nil)),
+	}
+	for _, tw := range tweaks {
+		tw(&cfg)
+	}
+	h := httpapi.NewHandler(cfg)
+	srv := httptest.NewUnstartedServer(h)
+	srvCert := p.issue(t, "broker-internal", nil, true)
+	srv.TLS = &tls.Config{
+		Certificates: []tls.Certificate{srvCert},
+		ClientAuth:   tls.VerifyClientCertIfGiven,
+		ClientCAs:    p.pool,
+	}
+	srv.StartTLS()
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: p.caCert.Raw})
+	e := &env{srv: srv, caPEM: caPEM, pki: p, fb: fb, logs: logs}
+	t.Cleanup(srv.Close)
+	return e
+}
+
+func (e *env) client(t *testing.T, cert *tls.Certificate) *http.Client {
+	t.Helper()
+	cfg := &tls.Config{RootCAs: e.pki.pool}
+	if cert != nil {
+		cfg.Certificates = []tls.Certificate{*cert}
+	}
+	return &http.Client{Transport: &http.Transport{TLSClientConfig: cfg}}
+}
+
+var sampleLease = broker.Lease{
+	ID:                "lease-abc",
+	WorkspaceUID:      "ws-1",
+	TenantID:          "tenant-a",
+	PrincipalSubject:  "iss|alice",
+	RuntimeGeneration: 3,
+	RuntimeUID:        "rt-3",
+	FencingVersion:    2,
+	GatewayID:         "gw-1",
+	ExpiresAt:         time.Now().Add(30 * time.Second).UTC(),
+}
+
+func TestRedeem_OK(t *testing.T) {
+	fb := &fakeBroker{redeemLease: sampleLease}
+	e := newEnv(t, fb)
+	cert := e.pki.issue(t, "gw-1", nil, false)
+	resp, err := e.client(t, &cert).Post(e.srv.URL+"/internal/v1/broker/redeem",
+		"application/json", bytes.NewReader([]byte(`{"ticket":"opaque-1"}`)))
+	if err != nil {
+		t.Fatalf("redeem: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("redeem status=%d body=%s", resp.StatusCode, b)
+	}
+	var lease broker.Lease
+	if err := json.NewDecoder(resp.Body).Decode(&lease); err != nil {
+		t.Fatalf("decode lease: %v", err)
+	}
+	if lease.ID != "lease-abc" || lease.FencingVersion != 2 {
+		t.Fatalf("bad lease json: %+v", lease)
+	}
+	if fb.gotGW.ID != "gw-1" || fb.gotGW.Audience != "session.example.dev" {
+		t.Fatalf("gateway identity = %+v, want gw-1/session.example.dev", fb.gotGW)
+	}
+	if fb.gotTicket != "opaque-1" {
+		t.Fatalf("ticket not forwarded: %q", fb.gotTicket)
+	}
+}
+
+func TestNoClientCert_401(t *testing.T) {
+	e := newEnv(t, &fakeBroker{})
+	resp, err := e.client(t, nil).Post(e.srv.URL+"/internal/v1/broker/redeem",
+		"application/json", bytes.NewReader([]byte(`{"ticket":"x"}`)))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status=%d, want 401", resp.StatusCode)
+	}
+	var body struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Code != "UNAUTHENTICATED" {
+		t.Fatalf("code=%q, want UNAUTHENTICATED", body.Code)
+	}
+}
+
+func TestWrongClientCA_Rejected(t *testing.T) {
+	e := newEnv(t, &fakeBroker{})
+	foreign := newPKI(t)
+	cert := foreign.issue(t, "gw-evil", nil, false)
+	_, err := e.client(t, &cert).Post(e.srv.URL+"/internal/v1/broker/redeem",
+		"application/json", bytes.NewReader([]byte(`{"ticket":"x"}`)))
+	if err == nil {
+		t.Fatal("request with foreign-CA client cert succeeded — handshake must fail")
+	}
+}
+
+func TestSPIFFESAN_MismatchRejected(t *testing.T) {
+	e := newEnv(t, &fakeBroker{})
+	cert := e.pki.issue(t, "gw-1", []string{"spiffe://cdi.tinyorbit.vn/gateway/gw-9"}, false)
+	resp, err := e.client(t, &cert).Post(e.srv.URL+"/internal/v1/broker/redeem",
+		"application/json", bytes.NewReader([]byte(`{"ticket":"x"}`)))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status=%d, want 403 for CN/SPIFFE mismatch", resp.StatusCode)
+	}
+}
+
+func TestSPIFFESAN_MatchAccepted(t *testing.T) {
+	fb := &fakeBroker{redeemLease: sampleLease}
+	e := newEnv(t, fb)
+	cert := e.pki.issue(t, "gw-1", []string{"spiffe://cdi.tinyorbit.vn/gateway/gw-1"}, false)
+	resp, err := e.client(t, &cert).Post(e.srv.URL+"/internal/v1/broker/redeem",
+		"application/json", bytes.NewReader([]byte(`{"ticket":"opaque-1"}`)))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want 200", resp.StatusCode)
+	}
+}
+
+func TestRedeem_ErrorMapping(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"invalid", broker.ErrTicketInvalid, http.StatusUnauthorized},
+		{"expired", broker.ErrTicketExpired, http.StatusUnauthorized},
+		{"revoked", broker.ErrRevoked, http.StatusGone},
+		{"denied", broker.ErrDenied, http.StatusForbidden},
+		{"in-use", broker.ErrConnectionInUse, http.StatusConflict},
+		{"stale", broker.ErrStaleBinding, http.StatusConflict},
+		{"freshness", broker.ErrFreshness, http.StatusServiceUnavailable},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t, &fakeBroker{redeemErr: tc.err})
+			cert := e.pki.issue(t, "gw-1", nil, false)
+			resp, err := e.client(t, &cert).Post(e.srv.URL+"/internal/v1/broker/redeem",
+				"application/json", bytes.NewReader([]byte(`{"ticket":"x"}`)))
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.want {
+				t.Fatalf("status=%d, want %d", resp.StatusCode, tc.want)
+			}
+		})
+	}
+}
+
+func TestRenew_OK_AndErrorMapping(t *testing.T) {
+	fb := &fakeBroker{renewLease: sampleLease}
+	e := newEnv(t, fb)
+	cert := e.pki.issue(t, "gw-1", nil, false)
+	body := `{"fence":{"version":2,"workspaceUID":"ws-1","runtimeGeneration":3,"runtimeUID":"rt-3"}}`
+	resp, err := e.client(t, &cert).Post(
+		e.srv.URL+"/internal/v1/broker/leases/lease-abc/renew",
+		"application/json", bytes.NewReader([]byte(body)))
+	if err != nil {
+		t.Fatalf("renew: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("renew status=%d", resp.StatusCode)
+	}
+	if fb.gotFence.FencingVersion != 2 || fb.gotLeaseID != "lease-abc" {
+		t.Fatalf("renew args: id=%q fence=%+v", fb.gotLeaseID, fb.gotFence)
+	}
+
+	// fenced/stale -> 409, revoked -> 410, unknown -> 404
+	for _, tc := range []struct {
+		err  error
+		want int
+	}{
+		{broker.ErrStaleBinding, http.StatusConflict},
+		{broker.ErrRevoked, http.StatusGone},
+		{broker.ErrLeaseInvalid, http.StatusNotFound},
+		{broker.ErrDenied, http.StatusForbidden},
+	} {
+		fb.renewErr = tc.err
+		resp, err := e.client(t, &cert).Post(
+			e.srv.URL+"/internal/v1/broker/leases/lease-abc/renew",
+			"application/json", bytes.NewReader([]byte(body)))
+		if err != nil {
+			t.Fatalf("renew: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != tc.want {
+			t.Fatalf("renew(%v) status=%d, want %d", tc.err, resp.StatusCode, tc.want)
+		}
+	}
+}
+
+func TestTarget_OK_AndRevoked(t *testing.T) {
+	fb := &fakeBroker{target: broker.Target{
+		Protocol:      "kasmvnc-websocket",
+		ServiceDNS:    "ws-1.ns-a.svc.cluster.local:8443",
+		UpstreamURL:   "https://ws-1.ns-a.svc.cluster.local:8443",
+		TLSServerName: "ws-1",
+		TLSCA:         []byte("pem-ca"),
+		Username:      "kasm_user",
+		Password:      "pw",
+	}}
+	e := newEnv(t, fb)
+	cert := e.pki.issue(t, "gw-1", nil, false)
+	resp, err := e.client(t, &cert).Get(e.srv.URL + "/internal/v1/broker/leases/lease-abc/target")
+	if err != nil {
+		t.Fatalf("target: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("target status=%d", resp.StatusCode)
+	}
+	var tgt broker.Target
+	if err := json.NewDecoder(resp.Body).Decode(&tgt); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if tgt.UpstreamURL == "" || tgt.TLSServerName != "ws-1" || tgt.Password != "pw" {
+		t.Fatalf("bad target json: %+v", tgt)
+	}
+
+	// revoked/expired lease -> 410
+	fb.targetErr = broker.ErrRevoked
+	resp2, err := e.client(t, &cert).Get(e.srv.URL + "/internal/v1/broker/leases/lease-abc/target")
+	if err != nil {
+		t.Fatalf("target: %v", err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusGone {
+		t.Fatalf("revoked target status=%d, want 410", resp2.StatusCode)
+	}
+}
+
+// TestRevoke_ReportsWhetherLiveLeaseChanged (R9c): the revoke answers 200
+// {"revoked": <bool>} — true only when a live lease was actually revoked — so
+// the session gateway can tell the operator the truth.
+func TestRevoke_ReportsWhetherLiveLeaseChanged(t *testing.T) {
+	for _, changed := range []bool{true, false} {
+		fb := &fakeBroker{revokeChanged: changed}
+		e := newEnv(t, fb)
+		cert := e.pki.issue(t, "gw-1", nil, false)
+		resp, err := e.client(t, &cert).Post(
+			e.srv.URL+"/internal/v1/broker/leases/lease-abc/revoke", "application/json", nil)
+		if err != nil {
+			t.Fatalf("revoke: %v", err)
+		}
+		var body struct {
+			Revoked *bool `json:"revoked"`
+		}
+		decodeErr := json.NewDecoder(resp.Body).Decode(&body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || decodeErr != nil || body.Revoked == nil || *body.Revoked != changed {
+			t.Fatalf("revoke (changed=%v): status=%d revoked=%v decode=%v, want 200 {\"revoked\":%v}",
+				changed, resp.StatusCode, body.Revoked, decodeErr, changed)
+		}
+		if fb.gotLeaseID != "lease-abc" {
+			t.Fatalf("revoke id=%q", fb.gotLeaseID)
+		}
+	}
+}
+
+// TestNoSecretsInLogs: ticket and credential material never reaches the
+// request log even on the paths that carry them.
+func TestNoSecretsInLogs(t *testing.T) {
+	fb := &fakeBroker{redeemLease: sampleLease, target: broker.Target{Password: "s3cr3t-pw"}}
+	e := newEnv(t, fb)
+	cert := e.pki.issue(t, "gw-1", nil, false)
+	resp, err := e.client(t, &cert).Post(e.srv.URL+"/internal/v1/broker/redeem",
+		"application/json", bytes.NewReader([]byte(`{"ticket":"tkt_super_secret_value"}`)))
+	if err != nil {
+		t.Fatalf("redeem: %v", err)
+	}
+	resp.Body.Close()
+	resp2, err := e.client(t, &cert).Get(e.srv.URL + "/internal/v1/broker/leases/lease-abc/target")
+	if err != nil {
+		t.Fatalf("target: %v", err)
+	}
+	resp2.Body.Close()
+	if logs := e.logs.String(); bytes.Contains([]byte(logs), []byte("tkt_super_secret_value")) ||
+		bytes.Contains([]byte(logs), []byte("s3cr3t-pw")) {
+		t.Fatalf("secrets leaked into logs: %s", logs)
+	}
+}
+
+// --- activity + operator revocation/drain ---------------------------------
+
+func TestActivity_204_AndForwards(t *testing.T) {
+	fb := &fakeBroker{}
+	e := newEnv(t, fb)
+	cert := e.pki.issue(t, "gw-1", nil, false)
+	body := `{"fence":{"version":2,"workspaceUID":"ws-1","runtimeGeneration":3,"runtimeUID":"rt-3"},"type":"connected","streamEpoch":7}`
+	resp, err := e.client(t, &cert).Post(
+		e.srv.URL+"/internal/v1/broker/leases/lease-abc/activity",
+		"application/json", bytes.NewReader([]byte(body)))
+	if err != nil {
+		t.Fatalf("activity: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("activity status=%d, want 204", resp.StatusCode)
+	}
+	if fb.gotEvent.Type != broker.ActivityConnected || fb.gotEvent.StreamEpoch != 7 || fb.gotLeaseID != "lease-abc" ||
+		fb.gotFence.FencingVersion != 2 || fb.gotGW.ID != "gw-1" {
+		t.Fatalf("activity args: ev=%+v lease=%q fence=%+v gw=%+v",
+			fb.gotEvent, fb.gotLeaseID, fb.gotFence, fb.gotGW)
+	}
+}
+
+func TestActivity_ErrorMapping(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want int
+	}{
+		{broker.ErrStaleBinding, http.StatusConflict},
+		{broker.ErrRevoked, http.StatusGone},
+		{broker.ErrLeaseInvalid, http.StatusGone},
+		{broker.ErrDenied, http.StatusForbidden},
+		{broker.ErrActivityType, http.StatusBadRequest},
+	} {
+		e := newEnv(t, &fakeBroker{activityErr: tc.err})
+		cert := e.pki.issue(t, "gw-1", nil, false)
+		resp, err := e.client(t, &cert).Post(
+			e.srv.URL+"/internal/v1/broker/leases/lease-abc/activity",
+			"application/json", bytes.NewReader([]byte(`{"fence":{},"type":"input"}`)))
+		if err != nil {
+			t.Fatalf("activity: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != tc.want {
+			t.Fatalf("activity(%v) status=%d, want %d", tc.err, resp.StatusCode, tc.want)
+		}
+	}
+}
+
+// Identity split: the operator cert cannot report gateway activity, and a
+// gateway cert cannot drive the workspace-scoped operator routes.
+func TestActivity_OperatorIdentityForbidden(t *testing.T) {
+	e := newEnv(t, &fakeBroker{})
+	cert := e.pki.issue(t, httpapi.DefaultOperatorCN, nil, false)
+	resp, err := e.client(t, &cert).Post(
+		e.srv.URL+"/internal/v1/broker/leases/lease-abc/activity",
+		"application/json", bytes.NewReader([]byte(`{"fence":{},"type":"input"}`)))
+	if err != nil {
+		t.Fatalf("activity: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("operator activity status=%d, want 403", resp.StatusCode)
+	}
+}
+
+func TestTransferClaim_OK_AndErrorMapping(t *testing.T) {
+	const tid = "xf_abcdefghijklmnopqrstuvwxyz"
+	const base = "/internal/v1/broker/leases/lease-abc/transfers/"
+	fb := &fakeBroker{grant: broker.TransferGrant{ID: tid, WorkspaceUID: "ws-1", Direction: "upload", Path: "a.txt", MaxBytes: 5}}
+	e := newEnv(t, fb)
+	cert := e.pki.issue(t, "gw-1", nil, false)
+	resp, err := e.client(t, &cert).Post(e.srv.URL+base+tid+"/claim",
+		"application/json", strings.NewReader(`{"method":"PUT"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var g broker.TransferGrant
+	_ = json.NewDecoder(resp.Body).Decode(&g)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || g != fb.grant || fb.gotMethod != "PUT" || fb.gotTransferID != tid || fb.gotGW.ID != "gw-1" {
+		t.Fatalf("claim: %d %+v method=%q", resp.StatusCode, g, fb.gotMethod)
+	}
+	for _, tc := range []struct {
+		err  error
+		want int
+		code string
+	}{
+		{broker.ErrTransferInvalid, http.StatusGone, "TRANSFER_INVALID"},
+		{broker.ErrTransferDenied, http.StatusForbidden, "TRANSFER_DENIED"},
+		{broker.ErrTransferBusy, http.StatusConflict, "TRANSFER_BUSY"},
+		{broker.ErrRevoked, http.StatusGone, "REVOKED"},
+	} {
+		e := newEnv(t, &fakeBroker{transferErr: tc.err})
+		cert := e.pki.issue(t, "gw-1", nil, false)
+		resp, err := e.client(t, &cert).Post(e.srv.URL+base+tid+"/claim",
+			"application/json", strings.NewReader(`{"method":"GET"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var body struct {
+			Code string `json:"code"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		resp.Body.Close()
+		if resp.StatusCode != tc.want || body.Code != tc.code {
+			t.Fatalf("claim(%v) = %d %q, want %d %q", tc.err, resp.StatusCode, body.Code, tc.want, tc.code)
+		}
+	}
+	resp, err = e.client(t, &cert).Post(e.srv.URL+base+tid+"/complete",
+		"application/json", strings.NewReader(`{"bytes":5,"ok":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent || fb.gotBytes != 5 || !fb.gotOK {
+		t.Fatalf("complete: %d bytes=%d ok=%v", resp.StatusCode, fb.gotBytes, fb.gotOK)
+	}
+	for _, bad := range []struct{ path, body string }{
+		{"xf_..%2Fx/claim", `{"method":"GET"}`},       // malformed transfer id
+		{tid + "/claim", `{"method":"DELETE"}`},       // unknown method
+		{tid + "/complete", `{"bytes":-1,"ok":true}`}, // negative byte count
+	} {
+		resp, err := e.client(t, &cert).Post(e.srv.URL+base+bad.path, "application/json", strings.NewReader(bad.body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("%s %s: %d, want 400", bad.path, bad.body, resp.StatusCode)
+		}
+	}
+	op := e.pki.issue(t, httpapi.DefaultOperatorCN, nil, false)
+	resp, err = e.client(t, &op).Post(e.srv.URL+base+tid+"/claim", "application/json", strings.NewReader(`{"method":"GET"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("operator identity on the claim route: %d, want 403", resp.StatusCode)
+	}
+}
+
+func TestOperatorEndpoints_GatewayForbidden(t *testing.T) {
+	fb := &fakeBroker{revokedLeases: 2, openStreams: 1}
+	e := newEnv(t, fb)
+	gw := e.pki.issue(t, "gw-1", nil, false)
+
+	resp, err := e.client(t, &gw).Post(
+		e.srv.URL+"/internal/v1/broker/workspaces/ws-1/revoke",
+		"application/json", bytes.NewReader([]byte(`{"runtimeGeneration":3}`)))
+	if err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("gateway revoke status=%d, want 403", resp.StatusCode)
+	}
+
+	resp, err = e.client(t, &gw).Get(e.srv.URL + "/internal/v1/broker/workspaces/ws-1/drain")
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("gateway drain status=%d, want 403", resp.StatusCode)
+	}
+
+	// And the operator cert cannot redeem (vice-versa check).
+	op := e.pki.issue(t, httpapi.DefaultOperatorCN, nil, false)
+	resp, err = e.client(t, &op).Post(e.srv.URL+"/internal/v1/broker/redeem",
+		"application/json", bytes.NewReader([]byte(`{"ticket":"x"}`)))
+	if err != nil {
+		t.Fatalf("redeem: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("operator redeem status=%d, want 403", resp.StatusCode)
+	}
+}
+
+func TestRevokeWorkspace_OK(t *testing.T) {
+	fb := &fakeBroker{revokedLeases: 2}
+	e := newEnv(t, fb)
+	op := e.pki.issue(t, httpapi.DefaultOperatorCN, nil, false)
+	resp, err := e.client(t, &op).Post(
+		e.srv.URL+"/internal/v1/broker/workspaces/ws-1/revoke",
+		"application/json", bytes.NewReader([]byte(`{"runtimeGeneration":3}`)))
+	if err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("revoke status=%d, want 200", resp.StatusCode)
+	}
+	var out struct {
+		RevokedLeases int `json:"revokedLeases"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.RevokedLeases != 2 || fb.gotWsUID != "ws-1" || fb.gotWsGen != 3 {
+		t.Fatalf("revoke: n=%d uid=%q gen=%d", out.RevokedLeases, fb.gotWsUID, fb.gotWsGen)
+	}
+}
+
+func TestDrainWorkspace_OK(t *testing.T) {
+	fb := &fakeBroker{openStreams: 1, drained: false}
+	e := newEnv(t, fb)
+	op := e.pki.issue(t, httpapi.DefaultOperatorCN, nil, false)
+	resp, err := e.client(t, &op).Get(e.srv.URL + "/internal/v1/broker/workspaces/ws-1/drain")
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("drain status=%d, want 200", resp.StatusCode)
+	}
+	var out struct {
+		OpenStreams int  `json:"openStreams"`
+		Drained     bool `json:"drained"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.OpenStreams != 1 || out.Drained {
+		t.Fatalf("drain: %+v", out)
+	}
+}
+
+// TestNoLeaseIDsInLogs (SEC-41): a lease id is bearer material on this
+// listener — lease id + any gateway-CN cert resolves runtime credentials —
+// so the request log must carry the matched route pattern plus a truncated
+// hash of the id, never the raw id itself.
+func TestNoLeaseIDsInLogs(t *testing.T) {
+	fb := &fakeBroker{renewLease: sampleLease}
+	e := newEnv(t, fb)
+	cert := e.pki.issue(t, "gw-1", nil, false)
+	resp, err := e.client(t, &cert).Post(
+		e.srv.URL+"/internal/v1/broker/leases/lease-abc/renew",
+		"application/json",
+		bytes.NewReader([]byte(`{"fence":{"workspaceUID":"ws-1","runtimeGeneration":3,"runtimeUID":"rt-3","fencingVersion":2}}`)))
+	if err != nil {
+		t.Fatalf("renew: %v", err)
+	}
+	resp.Body.Close()
+	resp2, err := e.client(t, &cert).Get(e.srv.URL + "/internal/v1/broker/leases/lease-abc/target")
+	if err != nil {
+		t.Fatalf("target: %v", err)
+	}
+	resp2.Body.Close()
+
+	logs := e.logs.String()
+	if strings.Contains(logs, "lease-abc") {
+		t.Fatalf("raw lease id leaked into request logs: %s", logs)
+	}
+	if !strings.Contains(logs, "/internal/v1/broker/leases/{id}") {
+		t.Fatalf("request log lost the route pattern: %s", logs)
+	}
+}
+
+// capAllower is a ratelimit.Allower test stub: it allows the first max
+// calls and refuses the rest — deterministic rejection-log limiting.
+type capAllower struct{ n, max int }
+
+func (c *capAllower) Allow(string) (bool, time.Duration) {
+	c.n++
+	return c.n <= c.max, 0
+}
+
+// The broker refuses a runtimeGeneration beyond the workspace's recorded
+// bound; the refusal surfaces as 400 INVALID_REQUEST, not a revocation.
+func TestRevokeWorkspace_GenerationUnbounded(t *testing.T) {
+	fb := &fakeBroker{revokeWsErr: broker.ErrGenerationUnbounded}
+	e := newEnv(t, fb)
+	op := e.pki.issue(t, httpapi.DefaultOperatorCN, nil, false)
+	resp, err := e.client(t, &op).Post(
+		e.srv.URL+"/internal/v1/broker/workspaces/ws-1/revoke",
+		"application/json", bytes.NewReader([]byte(`{"runtimeGeneration":4611686018427387904}`)))
+	if err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("revoke status=%d, want 400", resp.StatusCode)
+	}
+	var body struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Code != "INVALID_REQUEST" {
+		t.Fatalf("code=%q, want INVALID_REQUEST", body.Code)
+	}
+}
+
+// TestIdentify_RejectionsLogged: requests refused by the identify
+// middleware never reach logRequests, so the boundary warn line is
+// emitted inside identify itself — peer, reason class and redacted path,
+// never any certificate material.
+func TestIdentify_RejectionsLogged(t *testing.T) {
+	e := newEnv(t, &fakeBroker{})
+
+	// No client certificate -> 401, reason no_cert.
+	resp, err := e.client(t, nil).Post(e.srv.URL+"/internal/v1/broker/redeem",
+		"application/json", bytes.NewReader([]byte(`{"ticket":"x"}`)))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status=%d, want 401", resp.StatusCode)
+	}
+	logs := e.logs.String()
+	for _, want := range []string{
+		`"msg":"internal_auth_rejected"`,
+		`"reason":"no_cert"`,
+		`"status":401`,
+		`"path":"/internal/v1/broker/redeem"`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("rejection log missing %s: %s", want, logs)
+		}
+	}
+	if strings.Contains(logs, `"request_id":""`) || !strings.Contains(logs, `"request_id":"`) ||
+		strings.Contains(logs, `"peer":""`) || !strings.Contains(logs, `"peer":"`) {
+		t.Fatalf("request_id/peer missing or empty in rejection log: %s", logs)
+	}
+
+	// Verified cert with an empty CN -> 401, reason no_cn.
+	e.logs.Reset()
+	emptyCN := e.pki.issue(t, "", nil, false)
+	resp, err = e.client(t, &emptyCN).Post(e.srv.URL+"/internal/v1/broker/redeem",
+		"application/json", bytes.NewReader([]byte(`{"ticket":"x"}`)))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status=%d, want 401", resp.StatusCode)
+	}
+	if !strings.Contains(e.logs.String(), `"reason":"no_cn"`) {
+		t.Fatalf("empty-CN rejection not logged: %s", e.logs.String())
+	}
+
+	// SPIFFE SAN disagreeing with the CN -> 403, reason spiffe_mismatch.
+	e.logs.Reset()
+	mismatched := e.pki.issue(t, "gw-1", []string{"spiffe://cdi.tinyorbit.vn/gateway/gw-9"}, false)
+	resp, err = e.client(t, &mismatched).Post(e.srv.URL+"/internal/v1/broker/redeem",
+		"application/json", bytes.NewReader([]byte(`{"ticket":"x"}`)))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status=%d, want 403", resp.StatusCode)
+	}
+	logs = e.logs.String()
+	if !strings.Contains(logs, `"reason":"spiffe_mismatch"`) || !strings.Contains(logs, `"status":403`) {
+		t.Fatalf("SPIFFE rejection not logged: %s", logs)
+	}
+}
+
+// TestIdentify_RejectedPathRedacted (SEC-41): the rejection log's path
+// field keeps the route shape but hashes every identifier segment — a
+// lease id in an auth-failed request is still bearer material and must
+// never reach the log.
+func TestIdentify_RejectedPathRedacted(t *testing.T) {
+	e := newEnv(t, &fakeBroker{})
+	resp, err := e.client(t, nil).Post(
+		e.srv.URL+"/internal/v1/broker/leases/lease-secret-handle/renew",
+		"application/json", bytes.NewReader([]byte(`{"fence":{}}`)))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+	logs := e.logs.String()
+	if strings.Contains(logs, "lease-secret-handle") {
+		t.Fatalf("raw lease id leaked into rejection log: %s", logs)
+	}
+	if !strings.Contains(logs, `/internal/v1/broker/leases/sha256:`) ||
+		!strings.Contains(logs, `/renew`) {
+		t.Fatalf("rejection log lost the route shape: %s", logs)
+	}
+}
+
+// TestIdentify_RejectionsRateLimited: the warn line is bounded per reason
+// class — a sprayed bad-auth probe cannot flood the log pipeline.
+func TestIdentify_RejectionsRateLimited(t *testing.T) {
+	lim := &capAllower{max: 3}
+	e := newEnv(t, &fakeBroker{}, func(c *httpapi.Config) { c.AuthLogLimit = lim })
+	for i := 0; i < 6; i++ {
+		resp, err := e.client(t, nil).Post(e.srv.URL+"/internal/v1/broker/redeem",
+			"application/json", bytes.NewReader([]byte(`{"ticket":"x"}`)))
+		if err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("request %d status=%d, want 401", i, resp.StatusCode)
+		}
+	}
+	if got := strings.Count(e.logs.String(), "internal_auth_rejected"); got != 3 {
+		t.Fatalf("rejection warn lines = %d, want 3 (limiter-capped)", got)
+	}
+}
+
+// TestIdentify_RejectionsCounted: the warn line is rate-limited but the
+// counter is the complete record — every refused attempt increments
+// tinycdi_internal_auth_failures_total by bounded reason class.
+func TestIdentify_RejectionsCounted(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := observability.NewMetrics(reg, nil)
+	e := newEnv(t, &fakeBroker{}, func(c *httpapi.Config) { c.Metrics = m })
+
+	resp, err := e.client(t, nil).Post(e.srv.URL+"/internal/v1/broker/redeem",
+		"application/json", bytes.NewReader([]byte(`{"ticket":"x"}`)))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+	mismatched := e.pki.issue(t, "gw-1", []string{"spiffe://cdi.tinyorbit.vn/gateway/gw-9"}, false)
+	resp2, err := e.client(t, &mismatched).Post(e.srv.URL+"/internal/v1/broker/redeem",
+		"application/json", bytes.NewReader([]byte(`{"ticket":"x"}`)))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp2.Body.Close()
+
+	want := `# HELP tinycdi_internal_auth_failures_total mTLS identity rejections on the internal broker listener, by bounded reason class — the per-request warn line is rate-limited, this counter is the complete record.
+# TYPE tinycdi_internal_auth_failures_total counter
+tinycdi_internal_auth_failures_total{reason="no_cert"} 1
+tinycdi_internal_auth_failures_total{reason="spiffe_mismatch"} 1
+`
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(want),
+		"tinycdi_internal_auth_failures_total"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// internalRoutes is every route on the internal listener, with a body
+// the handlers would accept far enough to call the broker.
+var internalRoutes = []struct{ method, path, body string }{
+	{http.MethodPost, "/internal/v1/broker/redeem", `{"ticket":"x"}`},
+	{http.MethodPost, "/internal/v1/broker/leases/lease-abc/renew", `{}`},
+	{http.MethodGet, "/internal/v1/broker/leases/lease-abc/target", ``},
+	{http.MethodPost, "/internal/v1/broker/leases/lease-abc/revoke", ``},
+	{http.MethodPost, "/internal/v1/broker/leases/lease-abc/activity", `{}`},
+	{http.MethodPost, "/internal/v1/broker/leases/lease-abc/transfers/t-1/claim", `{}`},
+	{http.MethodPost, "/internal/v1/broker/leases/lease-abc/transfers/t-1/complete", `{}`},
+	{http.MethodPost, "/internal/v1/broker/workspaces/ws-1/revoke", `{}`},
+	{http.MethodGet, "/internal/v1/broker/workspaces/ws-1/drain", ``},
+}
+
+func callRoute(t *testing.T, c *http.Client, base, method, path, body string) int {
+	t.Helper()
+	req, err := http.NewRequest(method, base+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	return resp.StatusCode
+}
+
+// brokerUntouched fails the test if any broker method recorded a call.
+func brokerUntouched(t *testing.T, fb *fakeBroker) {
+	t.Helper()
+	if fb.gotGW != (broker.GatewayIdentity{}) || fb.gotTicket != "" || fb.gotLeaseID != "" ||
+		fb.gotWsUID != "" || fb.gotTransferID != "" {
+		t.Fatalf("broker was called: %+v", fb)
+	}
+}
+
+// TestUnknownCN_Refused (R1-32): the gateway role is opt-in. A cert the
+// internal CA signed whose CN is neither the operator CN nor on
+// GatewayCNs gets 403 on every route — lease, transfer and workspace —
+// the broker is never called, and each refusal is counted as
+// role_mismatch.
+func TestUnknownCN_Refused(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := observability.NewMetrics(reg, nil)
+	e := newEnv(t, &fakeBroker{revokeChanged: true}, func(c *httpapi.Config) { c.Metrics = m })
+	cert := e.pki.issue(t, "some-other-workload", nil, false)
+	c := e.client(t, &cert)
+	for _, rt := range internalRoutes {
+		if got := callRoute(t, c, e.srv.URL, rt.method, rt.path, rt.body); got != http.StatusForbidden {
+			t.Errorf("%s %s: status %d, want 403", rt.method, rt.path, got)
+		}
+	}
+	brokerUntouched(t, e.fb)
+	want := fmt.Sprintf(`# HELP tinycdi_internal_auth_failures_total mTLS identity rejections on the internal broker listener, by bounded reason class — the per-request warn line is rate-limited, this counter is the complete record.
+# TYPE tinycdi_internal_auth_failures_total counter
+tinycdi_internal_auth_failures_total{reason="role_mismatch"} %d
+`, len(internalRoutes))
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(want),
+		"tinycdi_internal_auth_failures_total"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRoleMismatchCounted (R1-33, TM-40): a listed gateway calling an
+// operator route and the operator calling a gateway route are refused
+// 403 without reaching the broker, and both refusals are counted as
+// role_mismatch and logged as internal_auth_rejected.
+func TestRoleMismatchCounted(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := observability.NewMetrics(reg, nil)
+	e := newEnv(t, &fakeBroker{}, func(c *httpapi.Config) { c.Metrics = m })
+	gw := e.pki.issue(t, "gw-1", nil, false)
+	op := e.pki.issue(t, httpapi.DefaultOperatorCN, nil, false)
+	if got := callRoute(t, e.client(t, &gw), e.srv.URL, http.MethodGet,
+		"/internal/v1/broker/workspaces/ws-1/drain", ""); got != http.StatusForbidden {
+		t.Errorf("gateway on operator route: status %d, want 403", got)
+	}
+	if got := callRoute(t, e.client(t, &op), e.srv.URL, http.MethodPost,
+		"/internal/v1/broker/redeem", `{"ticket":"x"}`); got != http.StatusForbidden {
+		t.Errorf("operator on gateway route: status %d, want 403", got)
+	}
+	brokerUntouched(t, e.fb)
+	want := `# HELP tinycdi_internal_auth_failures_total mTLS identity rejections on the internal broker listener, by bounded reason class — the per-request warn line is rate-limited, this counter is the complete record.
+# TYPE tinycdi_internal_auth_failures_total counter
+tinycdi_internal_auth_failures_total{reason="role_mismatch"} 2
+`
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(want),
+		"tinycdi_internal_auth_failures_total"); err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(e.logs.String(), `"reason":"role_mismatch"`); n != 2 {
+		t.Errorf("role_mismatch warn lines = %d, want 2: %s", n, e.logs.String())
+	}
+}

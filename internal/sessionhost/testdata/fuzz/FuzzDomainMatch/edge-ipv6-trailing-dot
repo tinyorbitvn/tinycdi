@@ -1,0 +1,4 @@
+go test fuzz v1
+string("session.example.com")
+string("ws-0123456789abcdef.session.example.com.")
+string("ws_0123456789abcdef")

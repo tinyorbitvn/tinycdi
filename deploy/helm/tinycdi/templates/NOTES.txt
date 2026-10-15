@@ -1,0 +1,121 @@
+tinycdi {{ .Chart.Version }} installed into {{ .Release.Namespace }}.
+
+Portal:   https://{{ .Values.portalHost }}
+Sessions: https://*.{{ .Values.sessionDomain }}   (one host per workspace;
+          portalHost must not equal or sit inside sessionDomain — enforced
+          at render; needs a wildcard DNS record + certificate)
+
+Exposure:
+{{- if .Values.ingress.enabled }}
+  Ingress (class: {{ .Values.ingress.className | default "<default>" }})
+{{- else if .Values.gatewayApi.enabled }}
+  Gateway API HTTPRoutes ({{ len .Values.gatewayApi.parentRefs }} parentRef(s))
+{{- else }}
+  None — the backend and frontend Services are ClusterIP only: set
+  ingress.enabled or gatewayApi.enabled to expose the portal and session
+  hosts at the edge.
+{{- end }}
+
+Managed namespaces:
+{{- range .Values.managedNamespaces }}
+  - {{ .name }} (tenant: {{ .tenant }})
+{{- else }}
+  NONE — set managedNamespaces or the platform manages nothing.
+{{- end }}
+
+Tenant admin: IdP tokens carrying one of
+  {{ join ", " .Values.oidc.tenantAdminGroups }}
+  in their `groups` claim hold the tenant-admin role (exact match — a
+  Keycloak full path "/group" does not match "group"). Members get
+  tenant-wide read, stop/start/purge and quota/user-limit admin; review
+  the IdP group membership (oidc.tenantAdminGroups).
+
+{{- $unquoted := list }}
+{{- range .Values.managedNamespaces }}{{ if not .quota }}{{ $unquoted = append $unquoted .tenant }}{{ end }}{{ end }}
+{{- if $unquoted }}
+
+Tenant quotas: WARNING — no managedNamespaces[].quota for tenant(s)
+  {{ join ", " $unquoted }}
+  Workspace creates for them are refused with QUOTA_NOT_CONFIGURED (409)
+  unless a tenant_quota row already exists. Set quota: {runningWorkspaces,
+  cpu, memory, storage} on each entry, or quotaCeiling (same keys) to let
+  the tenant's admins set a quota up to it — see install.md "Tenant
+  quotas". Also consider managedNamespaces[].namespaceQuota, which bounds
+  the namespace in the apiserver independently of the platform quota.
+{{- end }}
+
+{{- $placement := (default dict (default dict .Values.runtime).placement) }}
+{{- if $placement.allowSharedNodes }}
+
+Runtime placement: WARNING — runtime.placement.allowSharedNodes=true.
+  Runtime pods schedule on ANY node: user desktops lose node-level
+  isolation and share nodes with unrelated workloads. Intended for
+  kind/dev clusters only — the default dedicated pool is described in
+  install.md "Workspace node pool".
+{{- else }}
+
+Runtime placement: dedicated pool — runtime pods (and the node-profile
+  installer) need nodes labeled
+  {{- range $k, $v := $placement.nodeSelector }} {{ $k }}={{ $v }}{{- end }}
+  and tainted to match runtime.placement.tolerations. Label + taint the
+  pool BEFORE launching workspaces or pods stay Pending — see install.md
+  "Workspace node pool".
+{{- end }}
+
+{{- if eq (printf "%v" (dig "appArmor" "requireRuntimeDefault" true .Values.runtime)) "false" }}
+
+AppArmor: runtime.appArmor.requireRuntimeDefault=false — runtime pods omit the RuntimeDefault AppArmor profile (nodes without AppArmor); templates with a Localhost AppArmor profile cannot run on such nodes.
+{{- end }}
+
+{{- if .Values.certManager.enabled }}
+Internal mTLS: cert-manager Certificates issue the broker chain
+{{- if .Values.certManager.selfSigned }} (self-signed CA bootstrapped){{- end }}.
+{{- end }}
+
+{{- if .Values.oidc.requiredGroups }}
+Login gate: only IdP tokens carrying one of
+  {{ join ", " .Values.oidc.requiredGroups }}
+  in their `groups` claim can log in (exact match — check your IdP's claim
+  format, e.g. Keycloak "/group" vs "group").
+{{- end }}
+
+{{- if .Values.admissionPolicy.enabled }}
+
+Admission policy: ValidatingAdmissionPolicy '{{ .Release.Name }}-template-snapshot'
+  denies non-operator writers add/change/remove of the
+  workspaces.cdi.tinyorbit.vn/template-snapshot annotation on workspaces
+  in the managed namespaces (requires Kubernetes >= 1.30).
+{{- end }}
+
+{{- if .Values.nodeProfiles.install.enabled }}
+Node profiles (mode: {{ .Values.nodeProfiles.install.mode | default "install" }}):
+  DaemonSet 'node-profiles' in the dedicated {{ .Values.nodeProfiles.install.namespace }}
+  namespace installs the browser seccomp/AppArmor Localhost profiles on
+  Linux worker nodes (privileged initContainer + caps-dropped uid-0
+  verifier — uid 0 is required to read the host's AppArmor loaded list).
+  Watch rollout:
+    kubectl -n {{ .Values.nodeProfiles.install.namespace }} get ds node-profiles
+  A browser pod scheduled before its node reports ready fails boot and is
+  retried — gate browser rollouts on DS readiness.
+{{- end }}
+
+{{- $co := (dig "networkProfiles" "clusterOnly" dict (default dict .Values.runtime)) }}
+{{- if $co.unrestricted }}
+
+ClusterOnly egress: UNRESTRICTED — runtime.networkProfiles.clusterOnly.unrestricted=true opted out of the restricted default; ClusterOnly workspaces can reach any pod in any namespace on any port (confinement rests on destination-side ingress policies).
+{{- end }}
+{{- $np := default dict .Values.networkPolicy }}
+{{- $edgeCIDRs := $np.edgeIngressCIDRs | default list }}
+{{- $edgeOpen := or (not $np.enabled) (eq (toString $np.edgeIngress) "any") (and (eq (toString $np.edgeIngress) "ipBlock") (or (has "0.0.0.0/0" $edgeCIDRs) (has "::/0" $edgeCIDRs))) }}
+{{- if and $co.unrestricted $edgeOpen }}
+
+Edge ingress: WARNING — runtime.networkProfiles.clusterOnly.unrestricted=true lets ClusterOnly workspaces reach any pod, and the backend's edge ingress admits every source (networkPolicy.edgeIngressCIDRs holds 0.0.0.0/0 or ::/0, edgeIngress=any, or networkPolicy.enabled=false), so a workspace can call the backend :8443/:8444 directly. Narrow networkPolicy.edgeIngressCIDRs to the load-balancer range (or use edgeIngress: cilium), and never list a range where workspace pods run in backend.trustedProxies: a trusted peer chooses its own rate-limit key through X-Forwarded-For.
+{{- end }}
+
+Reminder:
+  * CRDs in crds/ are installed/never deleted by Helm. Upgrading CRDs is a
+    manual step — see docs/runbooks/install.md.
+  * All Secrets are referenced by name only; create them BEFORE the pods
+    can start (see install.md "Secrets") unless certManager.enabled covers
+    the internal mTLS Secrets.
+  * `helm uninstall` keeps the managed namespaces, user PVCs and CRDs.

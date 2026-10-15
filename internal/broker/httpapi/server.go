@@ -1,0 +1,673 @@
+// Package httpapi is the internal mTLS gateway↔broker API (fixed contract,
+// ADR 0003). It serves only the broker surface the session gateways need —
+// ticket redemption, lease renewal, target resolution, revocation — on a
+// dedicated listener separate from the public API mux.
+//
+// Identity: the caller is authenticated by its verified client certificate.
+// The Subject CN is the gateway ID; an optional URI SAN of the form
+// spiffe://cdi.tinyorbit.vn/gateway/<id> must equal the CN when present. A
+// request without a verified client certificate is answered 401 with the
+// standard error model (api.WriteError). Ticket/lease material and runtime
+// credentials are never logged.
+package httpapi
+
+import (
+	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"net/http"
+	"strings"
+
+	"github.com/tinyorbitvn/tinycdi/internal/api"
+	"github.com/tinyorbitvn/tinycdi/internal/broker"
+	"github.com/tinyorbitvn/tinycdi/internal/observability"
+	"github.com/tinyorbitvn/tinycdi/internal/ratelimit"
+)
+
+// SPIFFE trust-domain prefix for gateway identities.
+const spiffePrefix = "spiffe://cdi.tinyorbit.vn/gateway/"
+
+// codeRevoked is the internal-only error code paired with HTTP 410 for dead
+// leases (revoked/superseded/expired). The public ErrorCode enum has no 410
+// mapping; the body still uses the standard api.Error JSON shape.
+const codeRevoked = api.ErrorCode("REVOKED")
+
+// Internal-only codes of the transfer routes: they share their statuses with
+// the lease errors (410, 403, 409), so the gateway tells them apart by code.
+const (
+	codeTransferInvalid = api.ErrorCode("TRANSFER_INVALID")
+	codeTransferDenied  = api.ErrorCode("TRANSFER_DENIED")
+	codeTransferBusy    = api.ErrorCode("TRANSFER_BUSY")
+)
+
+// DefaultOperatorCN is the client-certificate CN identifying the operator
+// on the workspace-scoped endpoints (revoke/drain). Those routes refuse any
+// other identity, and the gateway-scoped routes refuse the operator CN —
+// the two client populations are mutually exclusive.
+const DefaultOperatorCN = "operator"
+
+// BrokerAPI is the broker surface the internal API exposes.
+type BrokerAPI interface {
+	RedeemTicket(ctx context.Context, gw broker.GatewayIdentity, opaque string) (broker.Lease, error)
+	RenewLease(ctx context.Context, gw broker.GatewayIdentity, leaseID string, fence broker.Fence) (broker.Lease, error)
+	ResolveTarget(ctx context.Context, gw broker.GatewayIdentity, leaseID string) (broker.Target, error)
+	RevokeLease(ctx context.Context, leaseID string) error
+	// RevokeLeaseChanged reports whether a live lease was actually revoked.
+	RevokeLeaseChanged(ctx context.Context, leaseID string) (bool, error)
+	// ReportActivity records a gateway-observed session signal (input /
+	// connected / disconnect); the server stamps the receipt time.
+	ReportActivity(ctx context.Context, gw broker.GatewayIdentity, leaseID string, fence broker.Fence, ev broker.ActivityEvent) error
+	// RevokeWorkspaceLeases revokes every live lease of the workspace bound
+	// to a runtime generation <= runtimeGeneration and blocks new
+	// tickets/redeems for covered generations. Operator-only route.
+	RevokeWorkspaceLeases(ctx context.Context, workspaceUID broker.PlatformID, runtimeGeneration uint64) (int, error)
+	// DrainStatus reports gateway-reported open stream count for the
+	// workspace. Operator-only route.
+	DrainStatus(ctx context.Context, workspaceUID broker.PlatformID) (openStreams int, drained bool, err error)
+	// ClaimTransfer spends a minted transfer grant for the calling gateway's
+	// lease; CompleteTransfer closes it with the bytes moved.
+	ClaimTransfer(ctx context.Context, gw broker.GatewayIdentity, leaseID, transferID, method string) (broker.TransferGrant, error)
+	CompleteTransfer(ctx context.Context, gw broker.GatewayIdentity, leaseID, transferID string, bytesDone int64, ok bool) error
+}
+
+// Config wires the internal API handler.
+type Config struct {
+	// Broker is required.
+	Broker BrokerAPI
+	// Audience is the session-gateway audience all verified client certs map
+	// to (tickets bind to it at issuance). Required.
+	Audience string
+	// OperatorCN is the client-certificate CN of the operator identity
+	// allowed on /workspaces/* routes (revoke/drain). Empty defaults to
+	// DefaultOperatorCN.
+	OperatorCN string
+	// GatewayCNs are the client-certificate CNs that hold the gateway role
+	// on the lease and transfer routes. The role is opt-in: a verified CN
+	// that is neither OperatorCN nor listed here is refused 403
+	// (role_mismatch) before any route runs. Empty means no gateway
+	// identity exists — the chart's session gateway runs in process.
+	GatewayCNs []string
+	// Logger receives request logs; nil means silent.
+	Logger *slog.Logger
+	// Metrics counts identify-layer and role rejections on this listener
+	// (tinycdi_internal_auth_failures_total{reason}); nil disables.
+	Metrics *observability.Metrics
+	// AuthLogLimit bounds the rejection warn line per reason class; nil
+	// installs the default token bucket (1/s sustained, burst 10).
+	// Tests inject a stubbed Allower.
+	AuthLogLimit ratelimit.Allower
+}
+
+type ctxKey int
+
+const ctxKeyGateway ctxKey = iota
+
+// NewHandler builds the internal API handler. It must be served over TLS
+// with tls.Config.ClientCAs set to the gateway trust bundle and ClientAuth
+// VerifyClientCertIfGiven (the middleware turns an absent cert into a 401
+// instead of a handshake abort; an untrusted cert still fails the handshake).
+func NewHandler(cfg Config) http.Handler {
+	if cfg.OperatorCN == "" {
+		cfg.OperatorCN = DefaultOperatorCN
+	}
+	if cfg.AuthLogLimit == nil {
+		cfg.AuthLogLimit = ratelimit.New(authFailLogPerMinute, authFailLogBurst, 8, nil)
+	}
+	s := &server{cfg: cfg, gatewayCNs: make(map[string]struct{}, len(cfg.GatewayCNs))}
+	for _, cn := range cfg.GatewayCNs {
+		s.gatewayCNs[cn] = struct{}{}
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /internal/v1/broker/redeem", s.redeem)
+	mux.HandleFunc("POST /internal/v1/broker/leases/{id}/renew", s.renew)
+	mux.HandleFunc("GET /internal/v1/broker/leases/{id}/target", s.target)
+	mux.HandleFunc("POST /internal/v1/broker/leases/{id}/revoke", s.revoke)
+	mux.HandleFunc("POST /internal/v1/broker/leases/{id}/activity", s.activity)
+	mux.HandleFunc("POST /internal/v1/broker/leases/{id}/transfers/{tid}/claim", s.claimTransfer)
+	mux.HandleFunc("POST /internal/v1/broker/leases/{id}/transfers/{tid}/complete", s.completeTransfer)
+	mux.HandleFunc("POST /internal/v1/broker/workspaces/{uid}/revoke", s.revokeWorkspace)
+	mux.HandleFunc("GET /internal/v1/broker/workspaces/{uid}/drain", s.drainWorkspace)
+	return api.RequestID(s.identify(s.logRequests(mux)))
+}
+
+type server struct {
+	cfg        Config
+	gatewayCNs map[string]struct{}
+}
+
+// identify-layer refusal classes — the bounded `reason` label values of
+// tinycdi_internal_auth_failures_total and the rate-limit keys of the
+// rejection warn line.
+const (
+	authFailNoCert = "no_cert"
+	authFailNoCN   = "no_cn"
+	authFailSpiffe = "spiffe_mismatch"
+	authFailRole   = "role_mismatch"
+)
+
+const (
+	// authFailLogPerMinute is the sustained warn-line budget per reason
+	// class (1/second); authFailLogBurst is the bucket's capacity.
+	authFailLogPerMinute = 60
+	authFailLogBurst     = 10
+)
+
+// identify maps the verified peer certificate onto broker.GatewayIdentity.
+// Roles are opt-in: the CN must be the operator CN or one of GatewayCNs;
+// any other CN is refused 403 role_mismatch.
+func (s *server) identify(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+			s.rejectAuth(w, r, http.StatusUnauthorized, api.CodeUnauthenticated,
+				"client certificate required", authFailNoCert)
+			return
+		}
+		cert := r.TLS.PeerCertificates[0]
+		id := cert.Subject.CommonName
+		if id == "" {
+			s.rejectAuth(w, r, http.StatusUnauthorized, api.CodeUnauthenticated,
+				"client certificate has no gateway CN", authFailNoCN)
+			return
+		}
+		for _, u := range cert.URIs {
+			if strings.HasPrefix(u.String(), spiffePrefix) &&
+				strings.TrimPrefix(u.String(), spiffePrefix) != id {
+				s.rejectAuth(w, r, http.StatusForbidden, api.CodeForbidden,
+					"SPIFFE id does not match certificate CN", authFailSpiffe)
+				return
+			}
+		}
+		if _, gateway := s.gatewayCNs[id]; !gateway && id != s.cfg.OperatorCN {
+			s.rejectAuth(w, r, http.StatusForbidden, api.CodeForbidden,
+				"client certificate CN holds no role on this listener", authFailRole)
+			return
+		}
+		gw := broker.GatewayIdentity{ID: id, Audience: s.cfg.Audience}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKeyGateway, gw)))
+	})
+}
+
+// rejectAuth answers an identify-layer or role refusal. Identify refusals
+// never reach logRequests (identify wraps it), so every refusal is recorded
+// here: counted unconditionally on tinycdi_internal_auth_failures_total{reason}
+// and logged as a warn line rate-limited per reason class. The log carries
+// the peer, the reason class and the REDACTED path — the raw path embeds
+// the lease id, bearer material on this listener (SEC-41). Certificate,
+// key or SAN material is never logged.
+func (s *server) rejectAuth(w http.ResponseWriter, r *http.Request, status int, code api.ErrorCode, msg, reason string) {
+	if s.cfg.Metrics != nil {
+		s.cfg.Metrics.IncInternalAuthFailure(reason)
+	}
+	if s.cfg.Logger != nil {
+		if ok, _ := s.cfg.AuthLogLimit.Allow(reason); ok {
+			s.cfg.Logger.Warn("internal_auth_rejected",
+				"request_id", api.RequestIDFromContext(r.Context()),
+				"method", r.Method,
+				"path", redactPath(r.URL.Path),
+				"status", status,
+				"reason", reason,
+				"peer", r.RemoteAddr)
+		}
+	}
+	writeErr(w, r, status, code, msg)
+}
+
+func gatewayFrom(ctx context.Context) broker.GatewayIdentity {
+	gw, _ := ctx.Value(ctxKeyGateway).(broker.GatewayIdentity)
+	return gw
+}
+
+// logRequests emits a minimal per-request record: method, matched route,
+// status, request id, gateway id. Bodies, tickets, cookies and credentials
+// are never logged. SEC-41: the raw request path is never logged either —
+// it embeds the lease id, which is bearer material on this listener (id +
+// any gateway-CN cert resolves runtime credentials). The matched route
+// pattern is logged instead, plus a truncated sha256 of the lease id so
+// requests stay correlatable.
+func (s *server) logRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.cfg.Logger == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		rec := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		path := "-"
+		if p := r.Pattern; p != "" {
+			path = strings.TrimPrefix(p, r.Method+" ")
+		}
+		attrs := []any{
+			"request_id", api.RequestIDFromContext(r.Context()),
+			"method", r.Method,
+			"path", path,
+			"status", rec.status,
+			"gateway", gatewayFrom(r.Context()).ID,
+		}
+		if id := r.PathValue("id"); id != "" {
+			attrs = append(attrs, "lease_id", redactID(id))
+		}
+		s.cfg.Logger.Info("internal_request", attrs...)
+	})
+}
+
+// redactID renders a short hash of a sensitive identifier for logs
+// (SEC-41): correlatable across requests, useless as a credential.
+func redactID(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	return "sha256:" + hex.EncodeToString(sum[:])[:12]
+}
+
+// internalPathVocab is the fixed route vocabulary served on this listener;
+// every other path segment is an identifier (lease id, workspace uid).
+var internalPathVocab = map[string]struct{}{
+	"internal": {}, "v1": {}, "broker": {}, "redeem": {},
+	"leases": {}, "renew": {}, "target": {}, "revoke": {}, "activity": {},
+	"workspaces": {}, "drain": {},
+}
+
+// redactPath renders a request path for the identify-layer rejection log —
+// where r.Pattern is not yet set, so logRequests' route-template rule
+// cannot apply. Segments inside the fixed route vocabulary pass through;
+// everything else is replaced by its truncated hash (SEC-41, same rule as
+// redactID). The route shape stays legible and requests stay correlatable,
+// while bearer material never reaches the log even on auth-failed calls.
+func redactPath(p string) string {
+	segs := strings.Split(p, "/")
+	for i, seg := range segs {
+		if _, ok := internalPathVocab[seg]; seg != "" && !ok {
+			segs[i] = redactID(seg)
+		}
+	}
+	return strings.Join(segs, "/")
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+// writeErr renders the standard api.Error JSON shape at an explicit status —
+// needed for 410, which the public ErrorCode enum does not cover.
+func writeErr(w http.ResponseWriter, r *http.Request, status int, code api.ErrorCode, msg string) {
+	e := &api.Error{
+		Code:      code,
+		Message:   msg,
+		Retryable: code.Retryable(),
+		RequestID: api.RequestIDFromContext(r.Context()),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(e)
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		writeErr(w, r, http.StatusBadRequest, api.CodeInvalidRequest, "invalid request body")
+		return false
+	}
+	return true
+}
+
+// brokerError maps domain errors onto the contract status table:
+// 401 invalid/expired ticket, 403 denied/revoked-ticket, 404 unknown lease,
+// 409 stale binding / connection-in-use, 410 dead lease, 503 stale view.
+// The transfer errors reuse 410/403/409 under their own internal codes
+// (TRANSFER_INVALID, TRANSFER_DENIED, TRANSFER_BUSY).
+func brokerError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, broker.ErrTicketInvalid), errors.Is(err, broker.ErrTicketExpired):
+		writeErr(w, r, http.StatusUnauthorized, api.CodeUnauthenticated, "ticket invalid, used or expired")
+	case errors.Is(err, broker.ErrTransferInvalid):
+		writeErr(w, r, http.StatusGone, codeTransferInvalid, "transfer invalid, used or expired")
+	case errors.Is(err, broker.ErrTransferDenied):
+		writeErr(w, r, http.StatusForbidden, codeTransferDenied, "transfer denied by policy")
+	case errors.Is(err, broker.ErrTransferBusy):
+		writeErr(w, r, http.StatusConflict, codeTransferBusy, "a transfer is already in progress")
+	case errors.Is(err, broker.ErrRevoked):
+		writeErr(w, r, http.StatusGone, codeRevoked, "lease or ticket revoked")
+	case errors.Is(err, broker.ErrDenied):
+		writeErr(w, r, http.StatusForbidden, api.CodeForbidden, "denied")
+	case errors.Is(err, broker.ErrLeaseInvalid):
+		writeErr(w, r, http.StatusNotFound, api.CodeNotFound, "unknown lease")
+	case errors.Is(err, broker.ErrStaleBinding):
+		writeErr(w, r, http.StatusConflict, api.CodeInvalidState, "stale runtime binding")
+	case errors.Is(err, broker.ErrConnectionInUse):
+		writeErr(w, r, http.StatusConflict, api.CodeConnectionInUse, "workspace already has an active lease")
+	case errors.Is(err, broker.ErrFreshness):
+		writeErr(w, r, http.StatusServiceUnavailable, api.CodeUnavailable, "observed state too stale; retry")
+	case errors.Is(err, broker.ErrNotReady):
+		writeErr(w, r, http.StatusConflict, api.CodeInvalidState, "workspace not ready")
+	case errors.Is(err, broker.ErrNotFound):
+		writeErr(w, r, http.StatusNotFound, api.CodeNotFound, "not found")
+	case errors.Is(err, broker.ErrGenerationUnbounded):
+		writeErr(w, r, http.StatusBadRequest, api.CodeInvalidRequest, "runtime generation beyond recorded bound")
+	default:
+		writeErr(w, r, http.StatusInternalServerError, api.CodeInternal, "internal error")
+	}
+}
+
+type redeemRequest struct {
+	Ticket string `json:"ticket"`
+}
+
+func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
+	if !s.requireGateway(w, r) {
+		return
+	}
+	var req redeemRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.Ticket == "" {
+		writeErr(w, r, http.StatusBadRequest, api.CodeInvalidRequest, "ticket required")
+		return
+	}
+	lease, err := s.cfg.Broker.RedeemTicket(r.Context(), gatewayFrom(r.Context()), req.Ticket)
+	if err != nil {
+		brokerError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, lease)
+}
+
+type renewRequest struct {
+	Fence broker.Fence `json:"fence"`
+}
+
+func (s *server) renew(w http.ResponseWriter, r *http.Request) {
+	if !s.requireGateway(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" || len(id) > 128 || strings.ContainsAny(id, "/?#") {
+		writeErr(w, r, http.StatusBadRequest, api.CodeInvalidRequest, "bad lease id")
+		return
+	}
+	var req renewRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	lease, err := s.cfg.Broker.RenewLease(r.Context(), gatewayFrom(r.Context()), id, req.Fence)
+	if err != nil {
+		brokerError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, lease)
+}
+
+func (s *server) target(w http.ResponseWriter, r *http.Request) {
+	if !s.requireGateway(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" || len(id) > 128 {
+		writeErr(w, r, http.StatusBadRequest, api.CodeInvalidRequest, "bad lease id")
+		return
+	}
+	tgt, err := s.cfg.Broker.ResolveTarget(r.Context(), gatewayFrom(r.Context()), id)
+	if err != nil {
+		brokerError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, tgt)
+}
+
+func (s *server) revoke(w http.ResponseWriter, r *http.Request) {
+	if !s.requireGateway(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" || len(id) > 128 {
+		writeErr(w, r, http.StatusBadRequest, api.CodeInvalidRequest, "bad lease id")
+		return
+	}
+	changed, err := s.cfg.Broker.RevokeLeaseChanged(r.Context(), id)
+	if err != nil {
+		brokerError(w, r, err)
+		return
+	}
+	// {"revoked": false} is a successful no-op: the lease is unknown or was
+	// already dead, so nothing changed.
+	writeJSON(w, http.StatusOK, map[string]bool{"revoked": changed})
+}
+
+// requireGateway refuses the operator identity on the lease-scoped routes:
+// the operator cert is not a session gateway and must not mint or feed
+// session state.
+func (s *server) requireGateway(w http.ResponseWriter, r *http.Request) bool {
+	if gatewayFrom(r.Context()).ID == s.cfg.OperatorCN {
+		s.rejectAuth(w, r, http.StatusForbidden, api.CodeForbidden, "operator identity is not a gateway", authFailRole)
+		return false
+	}
+	return true
+}
+
+// requireOperator admits only the operator identity on the
+// workspace-scoped routes (revoke/drain) — a gateway cert gets 403.
+func (s *server) requireOperator(w http.ResponseWriter, r *http.Request) bool {
+	if gatewayFrom(r.Context()).ID != s.cfg.OperatorCN {
+		s.rejectAuth(w, r, http.StatusForbidden, api.CodeForbidden, "operator identity required", authFailRole)
+		return false
+	}
+	return true
+}
+
+// leaseID validates the {id} path value shared by the lease routes.
+func leaseID(w http.ResponseWriter, r *http.Request) (string, bool) {
+	id := r.PathValue("id")
+	if id == "" || len(id) > 128 || strings.ContainsAny(id, "/?#") {
+		writeErr(w, r, http.StatusBadRequest, api.CodeInvalidRequest, "bad lease id")
+		return "", false
+	}
+	return id, true
+}
+
+// workspaceUID validates the {uid} path value shared by the workspace routes.
+func workspaceUID(w http.ResponseWriter, r *http.Request) (string, bool) {
+	uid := r.PathValue("uid")
+	if uid == "" || len(uid) > 128 || strings.ContainsAny(uid, "/?#") {
+		writeErr(w, r, http.StatusBadRequest, api.CodeInvalidRequest, "bad workspace uid")
+		return "", false
+	}
+	return uid, true
+}
+
+type activityRequest struct {
+	Fence broker.Fence             `json:"fence"`
+	Type  broker.ActivityEventType `json:"type"`
+	// StreamEpoch is the epoch ClaimStream returned to the reporting
+	// stream; connected/disconnect reports of a fenced epoch are ignored.
+	StreamEpoch uint64 `json:"streamEpoch,omitempty"`
+}
+
+// activity records a gateway-reported session signal. The receipt time is
+// stamped server-side by the broker; client-supplied times are ignored.
+// Errors: 400 unknown event type, 403 foreign gateway, 409 fenced/stale,
+// 410 dead lease, 503 stale binding view.
+func (s *server) activity(w http.ResponseWriter, r *http.Request) {
+	if !s.requireGateway(w, r) {
+		return
+	}
+	id, ok := leaseID(w, r)
+	if !ok {
+		return
+	}
+	var req activityRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	err := s.cfg.Broker.ReportActivity(r.Context(), gatewayFrom(r.Context()), id,
+		req.Fence, broker.ActivityEvent{Type: req.Type, StreamEpoch: req.StreamEpoch})
+	if err != nil {
+		switch {
+		case errors.Is(err, broker.ErrActivityType):
+			writeErr(w, r, http.StatusBadRequest, api.CodeInvalidRequest, "unknown activity type")
+		case errors.Is(err, broker.ErrRevoked), errors.Is(err, broker.ErrLeaseInvalid):
+			// A dead lease is 410 on this route per the contract — the
+			// broker reports it as ErrLeaseInvalid.
+			writeErr(w, r, http.StatusGone, codeRevoked, "lease revoked or expired")
+		default:
+			brokerError(w, r, err)
+		}
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// transferID validates the {tid} path value of the transfer routes.
+func transferID(w http.ResponseWriter, r *http.Request) (string, bool) {
+	tid := r.PathValue("tid")
+	if !broker.TransferIDOK(tid) {
+		writeErr(w, r, http.StatusBadRequest, api.CodeInvalidRequest, "bad transfer id")
+		return "", false
+	}
+	return tid, true
+}
+
+type claimTransferRequest struct {
+	Method string `json:"method"`
+}
+
+// claimTransfer spends a minted transfer grant for the calling gateway's
+// lease. Errors: 400 bad ids or method, 403 denied (foreign gateway or
+// policy), 409 stale binding or another transfer live, 410 dead lease or
+// invalid grant, 503 stale binding view.
+func (s *server) claimTransfer(w http.ResponseWriter, r *http.Request) {
+	if !s.requireGateway(w, r) {
+		return
+	}
+	id, ok := leaseID(w, r)
+	if !ok {
+		return
+	}
+	tid, ok := transferID(w, r)
+	if !ok {
+		return
+	}
+	var req claimTransferRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.Method != http.MethodGet && req.Method != http.MethodPut {
+		writeErr(w, r, http.StatusBadRequest, api.CodeInvalidRequest, "method must be GET or PUT")
+		return
+	}
+	grant, err := s.cfg.Broker.ClaimTransfer(r.Context(), gatewayFrom(r.Context()), id, tid, req.Method)
+	if err != nil {
+		brokerError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, grant)
+}
+
+type completeTransferRequest struct {
+	Bytes int64 `json:"bytes"`
+	OK    bool  `json:"ok"`
+}
+
+// completeTransfer closes a claimed grant with the bytes moved.
+func (s *server) completeTransfer(w http.ResponseWriter, r *http.Request) {
+	if !s.requireGateway(w, r) {
+		return
+	}
+	id, ok := leaseID(w, r)
+	if !ok {
+		return
+	}
+	tid, ok := transferID(w, r)
+	if !ok {
+		return
+	}
+	var req completeTransferRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.Bytes < 0 {
+		writeErr(w, r, http.StatusBadRequest, api.CodeInvalidRequest, "bytes must not be negative")
+		return
+	}
+	if err := s.cfg.Broker.CompleteTransfer(r.Context(), gatewayFrom(r.Context()), id, tid, req.Bytes, req.OK); err != nil {
+		brokerError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type revokeWorkspaceRequest struct {
+	RuntimeGeneration uint64 `json:"runtimeGeneration"`
+}
+
+// revokeWorkspace is the operator teardown seam: revoke the workspace's
+// live leases for the observed generation and block new connects for it.
+func (s *server) revokeWorkspace(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
+	uid, ok := workspaceUID(w, r)
+	if !ok {
+		return
+	}
+	var req revokeWorkspaceRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	n, err := s.cfg.Broker.RevokeWorkspaceLeases(r.Context(), broker.PlatformID(uid), req.RuntimeGeneration)
+	if err != nil {
+		brokerError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"revokedLeases": n})
+}
+
+// drainWorkspace reports the workspace's open interactive streams so the
+// operator's drain step can observe gateway progress.
+func (s *server) drainWorkspace(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperator(w, r) {
+		return
+	}
+	uid, ok := workspaceUID(w, r)
+	if !ok {
+		return
+	}
+	open, drained, err := s.cfg.Broker.DrainStatus(r.Context(), broker.PlatformID(uid))
+	if err != nil {
+		brokerError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"openStreams": open, "drained": drained})
+}
+
+// ServerTLSConfig builds the tls.Config for the internal listener: the
+// server presents cert; client certs are verified against clientCAPEM when
+// presented and the handler answers 401 when absent — the error model is
+// preserved instead of aborting the handshake on a missing cert.
+func ServerTLSConfig(cert tls.Certificate, clientCAPEM []byte) (*tls.Config, error) {
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(clientCAPEM) {
+		return nil, errors.New("httpapi: client CA bundle has no usable certificates")
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		ClientAuth:   tls.VerifyClientCertIfGiven,
+		ClientCAs:    pool,
+		MinVersion:   tls.VersionTLS13,
+	}, nil
+}

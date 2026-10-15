@@ -1,0 +1,18 @@
+# Managed (tenant) namespaces. resource-policy=keep: `helm uninstall`
+# leaves them — and every user PVC/Workspace inside — untouched.
+{{- range .Values.managedNamespaces }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .name }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    workspaces.cdi.tinyorbit.vn/tenant: {{ .tenant }}
+    pod-security.kubernetes.io/enforce: {{ $.Values.podSecurity.managedEnforce }}
+    pod-security.kubernetes.io/warn: {{ $.Values.podSecurity.managedEnforce }}
+    {{- include "tinycdi.labels" $ | nindent 4 }}
+{{- end }}
+# The release (platform) namespace itself is labeled by Helm only when
+# Helm creates it; the installer applies the PSS labels (see install.md).

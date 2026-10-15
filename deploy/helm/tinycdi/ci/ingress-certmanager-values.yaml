@@ -1,0 +1,51 @@
+# Ingress exposure + cert-manager issued internal mTLS. The chart renders
+# a self-signed CA chain (ClusterIssuer -> CA Certificate -> Issuer) and
+# two leaf Certificates producing the Secrets the pods mount. The CA
+# Secret is <release>-internal-ca (release name here is "tcdi" in tests);
+# backend.clientCA / operator.brokerClient.ca point at it.
+managedNamespaces:
+  - name: tinycdi-tenant-a
+    tenant: tenant-a
+
+portalHost: portal.lab.example.net
+sessionDomain: session.lab.example.net
+
+oidc:
+  issuer: https://idp.lab.example.net/realms/tinycdi
+  clientID: tinycdi
+  existingSecret: tinycdi-oidc-client
+
+database:
+  existingSecret: tinycdi-backend-db
+  allowedPeers:
+    - ipBlock: {cidr: 10.20.30.40/32}
+
+certManager:
+  enabled: true
+  selfSigned: true            # renders the bootstrap CA chain
+  # caSecretName defaults to <release>-internal-ca
+
+# Both CA-consuming refs point at the cert-manager CA Secret.
+backend:
+  loginKeys:
+    existingSecret: tinycdi-backend-login-keys
+  clientCA: {existingSecret: tcdi-internal-ca}
+operator:
+  brokerClient:
+    ca: {existingSecret: tcdi-internal-ca, key: ca.crt}
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+  tls:
+    existingSecret: tinycdi-ingress-tls
+
+# ci/dev clusters (kind) carry no dedicated workspace pool — opt out of
+# the default dedicated placement. Production values should keep
+# runtime.placement.allowSharedNodes: false and prepare the pool per
+# docs/runbooks/install.md "Workspace node pool".
+runtime:
+  placement:
+    allowSharedNodes: true

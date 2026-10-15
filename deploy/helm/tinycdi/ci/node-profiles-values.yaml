@@ -1,0 +1,37 @@
+# Optional component: nodeProfiles.install — renders the privileged,
+# hostPID node-profile installer DaemonSet (seccomp + AppArmor Localhost
+# profiles for browser workspaces) on all Linux non-control-plane nodes.
+managedNamespaces:
+  - name: tinycdi-tenant-a
+    tenant: tenant-a
+  - name: tinycdi-tenant-b
+    tenant: tenant-b
+
+portalHost: portal.lab.example.net
+sessionDomain: session.lab.example.net
+
+oidc:
+  issuer: https://idp.lab.example.net/realms/tinycdi
+  clientID: tinycdi
+  existingSecret: tinycdi-oidc-client
+
+database:
+  existingSecret: tinycdi-backend-db
+  allowedPeers:
+    - ipBlock: {cidr: 10.20.30.40/32}
+
+backend:
+  loginKeys:
+    existingSecret: tinycdi-backend-login-keys
+
+nodeProfiles:
+  install:
+    enabled: true
+
+# ci/dev clusters (kind) carry no dedicated workspace pool — opt out of
+# the default dedicated placement. Production values should keep
+# runtime.placement.allowSharedNodes: false and prepare the pool per
+# docs/runbooks/install.md "Workspace node pool".
+runtime:
+  placement:
+    allowSharedNodes: true

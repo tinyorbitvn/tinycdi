@@ -1,0 +1,172 @@
+# Release provenance — SBOMs, signatures and attestations
+
+Status: **implemented in CI**. The pipeline in `.github/workflows/images.yml`
+(every `main` push) and `.github/workflows/release.yml` (`v*` tags) produces
+signed, attested artifacts as described below — tools are sha256-pinned
+(syft 1.52.0, trivy 0.70.0, cosign v3.1.3). No release tag has been cut yet;
+this documents the mechanism a `vX.Y.Z` release exercises.
+
+All three signing workflows (`images.yml`, `release.yml`,
+`runtime-images.yml`) build without a shared build cache: no build reads
+or writes the GitHub Actions cache, so a cache entry another workflow
+wrote cannot become a layer of a signed image.
+
+## What a release artifact consists of
+
+Per the release interface contract, a release artifact has: image digests,
+SBOMs, provenance, NOTICE, and the compatibility matrix
+(`docs/compatibility.md`). Concretely, for each shipped image
+(`backend`, `frontend`, `operator`, `linux-base`, `linux-desktop`, `browser`, `kasm-adapter`) plus
+the Helm chart:
+
+1. **Digest-pinned reference** — build jobs push **by digest only**
+   (`push-by-digest=true`); `imagetools create` promotes tags (`:sha-<short>`,
+   `:main`, `:X.Y.Z`) only after signing. The digest lands in the
+   release manifest and in the Helm values a release deploys with
+   (`images.*.digest` in `deploy/helm/tinycdi/values.yaml`; seeded
+   `templates[]` image refs must be digest-pinned or CRD validation rejects
+   them).
+2. **SBOM** — SPDX JSON generated with pinned syft in the **build job**
+   (the scan and promote jobs never consume scan-job outputs).
+   Release assets additionally carry `sbom-<image>.spdx.json` files plus
+   dedicated `sbom-chart.spdx.json` (the packaged Helm chart) and
+   `sbom-binaries.spdx.json` (the static release binaries).
+3. **Vulnerability report** — trivy SARIF + table per image/arch, produced
+   by the no-secrets scan job; the gate semantics live in
+   [vulnerability-policy.md](vulnerability-policy.md).
+4. **Signature + attestation** — see below.
+5. **License inventory** — NOTICE + `THIRD_PARTY_LICENSES.md` regenerated
+   at the release ref.
+
+## Signing and attestation flow (as built)
+
+Signing identity: **keyless cosign via GitHub Actions OIDC**
+(`id-token: write`) → Fulcio-issued certificate bound to the exact workflow
+identity, recorded in the Rekor transparency log. No signing keys are
+stored anywhere. Per digest:
+
+```sh
+cosign sign --yes ghcr.io/tinyorbitvn/tinycdi-<img>@sha256:<digest>
+cosign attest --yes --type spdxjson \
+  --predicate sboms/sbom-<img>.spdx.json \
+  ghcr.io/tinyorbitvn/tinycdi-<img>@sha256:<digest>
+```
+
+The signer certificate identity is exact (anchored, no regex
+ambiguity):
+
+| Channel | Workflow | Identity |
+|---|---|---|
+| `:main` / `:sha-*` images | images.yml | `https://github.com/tinyorbitvn/tinycdi/.github/workflows/images.yml@refs/heads/main` |
+| release images + chart + blobs | release.yml | `https://github.com/tinyorbitvn/tinycdi/.github/workflows/release.yml@refs/tags/v<X.Y.Z>` |
+| `rt-*` images + `runtime-images.json` | runtime-images.yml | `https://github.com/tinyorbitvn/tinycdi/.github/workflows/runtime-images.yml@refs/heads/main` |
+
+Release runs additionally `cosign sign` the pushed OCI chart digest
+(`oci://ghcr.io/tinyorbitvn/charts/tinycdi`) and `cosign sign-blob` every
+release asset (`<asset>.sigstore.json` bundles), then `gh release create`.
+`helm push` tags the chart in the same call that uploads it, so the
+chart is the one release artifact that exists tagged before it is
+signed. `push-sign-chart.sh` signs it right after the push. If the push,
+the digest lookup or the signature fails, it deletes the chart version
+that run created, so an unsigned chart never stays tagged.
+The runtime train does the same for its deployment manifest: every
+`runtime-*` release carries `runtime-images.json` **and**
+`runtime-images.json.sigstore.json` — verify it with `cosign
+verify-blob` against the train identity above before pinning digests
+from it (exact command in `.github/README.md`).
+GitHub build-provenance attestations (`actions/attest-build-provenance`)
+are emitted only when the `ATTESTATIONS_ENABLED` repo variable is set —
+attestation storage on private repos requires GitHub Enterprise; the cosign
+SBOM attestations attached to the digests are unaffected. The runtime
+train has its own gate, `TRAIN_ATTESTATIONS_ENABLED` (unset = off until
+verified on a tag build).
+
+The provenance predicate records, at minimum:
+
+| Field | Source of truth |
+|---|---|
+| Source tree state | the git SHA (`GITHUB_SHA`) + tag; the release refuses refs not on `main` ancestry and refuses to overwrite an existing tag/release/GHCR version |
+| Build inputs | `FROM` digests (`golang`, `distroless/static`, `debian:bookworm-slim` lock entries), `ARG BASE_IMAGE` (the linux-desktop and browser profiles build FROM the exact pushed linux-base digest), pinned tool tarballs |
+| Build recipe | the workflow jobs themselves — pinned actions + sha256-verified tools |
+| Builder identity | the GitHub Actions OIDC identity (exact certificate identity above) |
+
+## Verification side (what a consumer runs)
+
+The full, copy-pasteable command set lives in `.github/README.md`
+"Verifying a release". Shapes:
+
+```sh
+cosign verify ghcr.io/tinyorbitvn/tinycdi-<img>@sha256:<digest> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity '<exact workflow identity above>'
+
+cosign verify-attestation --type spdxjson \
+  ghcr.io/tinyorbitvn/tinycdi-<img>@sha256:<digest> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity '<exact workflow identity above>'
+
+# release assets:
+cosign verify-blob --bundle <asset>.sigstore.json <asset> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity 'https://github.com/tinyorbitvn/tinycdi/.github/workflows/release.yml@refs/tags/vX.Y.Z'
+```
+
+Deployment-side enforcement (optional, later): a policy check that the
+cluster only runs digests carrying a valid attestation — admission-level
+verification is out of scope; the Helm chart already refuses
+non-digest image references in seeded templates and requires a pinned tag
+or digest for the node-profiles installer image, which is the shipped
+guarantee.
+
+## Digest-addressable does not mean released
+
+Build jobs push `type=registry,push-by-digest=true` **before** the scan
+gate runs. When the gate — or any upstream build leg — fails, the same
+workflow run's `cleanup` job deletes exactly the versions that run
+pushed: each pushed index, its per-platform and build
+attestation-manifest children and its referrers, resolved from the
+run's own `image-ref` artifacts by
+`.github/scripts/cleanup-failed-digests.sh`. The deletion is strictly
+run-scoped — never a sweep of unlabelled GHCR versions — and double
+bounded: a version goes only if it was created inside the run's window
+(`created_at >= run_started_at`, so a dedup'd identical rebuild's
+pre-existing version is untouched) and is reachable solely from that
+run's tree. If any candidate carries a non-digest tag or is reachable
+from a tagged manifest, nothing is deleted for that image — so a
+gate-failed `ghcr.io/tinyorbitvn/tinycdi-<img>@sha256:<digest>` does
+not stay pullable-by-digest and a published release can never be
+cleaned up by a failed run. The window and reachability checks are
+check-then-act — a version could in principle gain a tag or a referrer
+between resolution and deletion, a small check-then-act residual, listed
+in the release notes' known limitations.
+
+Even in the window between push and cleanup the residual carries no
+release trust:
+
+- it is **never tagged** — tags (`rt-*`, `:<ver>`, `:latest`, `:main`,
+  `:sha-*`) are promoted only by the publish job, after the trivy gate
+  passes and the digest is signed;
+- it is **never signed or attested** — `cosign verify` /
+  `verify-attestation` against the digest fails, and no signed manifest
+  (`runtime-images.json`, the packaged chart's `images.*.digest`, the
+  release `images.txt`) references it;
+- consumers pin digests only out of signed manifests and verify the
+  signature first — pulling a never-promoted digest is
+  indistinguishable from pulling any other unsigned image.
+
+## What a signature does not prove
+
+A cosign signature or a GitHub build-provenance attestation proves the
+artifact was built by **this repository's workflow** from the recorded
+commit/tag — nothing more. In particular it does **not** prove that a
+second person reviewed the change: the project currently has a single
+maintainer, and the same account can author, merge and approve a publish
+(accepted residual).
+
+The durable record is the **environment approval**, not the signature:
+the `release` and `runtime-train` environments each require a reviewer
+before their publish job runs, so every `v*` release and every `rt-*`
+train publish carries a recorded approval in the run's deployment
+history. Approve a train or release publish only once the publish job
+itself is waiting — the *pending deployment* review on the run — never
+at run start, before the build and scan jobs have finished.

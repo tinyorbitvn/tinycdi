@@ -1,0 +1,666 @@
+package provisioning
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
+	linux "github.com/tinyorbitvn/tinycdi/internal/runtime/linux"
+)
+
+// TenantNamespaces maps a verified tenant ID to the Kubernetes namespace
+// that holds its Workspace CRs. Unknown tenants are absent from the map.
+type TenantNamespaces map[string]string
+
+// Namespace resolves the mapping; ok=false for unmapped tenants.
+func (m TenantNamespaces) Namespace(tenantID string) (ns string, ok bool) {
+	ns, ok = m[tenantID]
+	return
+}
+
+// Label/annotation names stamped on every Workspace CR the API creates.
+const (
+	LabelWorkspaceUID   = "workspaces.cdi.tinyorbit.vn/workspace-uid"
+	LabelTenant         = "workspaces.cdi.tinyorbit.vn/tenant"
+	AnnotationRequestID = "workspaces.cdi.tinyorbit.vn/request-id"
+)
+
+// AnnotationConditionParams carries the structured message parameters of
+// status.conditions as JSON {"<type>.<reason>": {"<name>": "<value>"}} —
+// metav1.Condition itself cannot hold them. The operator writes it and the
+// API projects the entry that matches a condition's type and reason onto
+// the public condition's params; the single shared name keeps writer and
+// reader from drifting.
+const AnnotationConditionParams = "workspaces.cdi.tinyorbit.vn/condition-params"
+
+// AnnotationIntentBehind is stamped on a Workspace CR by the intent
+// applier when it drops an intent whose revision trails the CR's
+// spec.intentRevision — the signature of a platform DB restored behind the
+// live cluster (the restored workspaces.intent_revision restarted below
+// the fence the CR already carries). The operator reads it to raise the
+// IntentBehind condition and its event; the applier removes it on the
+// first intent that applies forward again.
+const AnnotationIntentBehind = "workspaces.cdi.tinyorbit.vn/intent-behind"
+
+// IntentBehindMark is the JSON payload of AnnotationIntentBehind:
+// RowRevision is the dropped intent's revision (the workspace row's
+// intent_revision), CRRevision the spec.intentRevision it trailed.
+type IntentBehindMark struct {
+	RowRevision int64 `json:"rowRevision"`
+	CRRevision  int64 `json:"crRevision"`
+}
+
+// intentFenceDrifted reports whether a dropped intent evidences stream
+// drift rather than an idempotent replay. Delivery is at-least-once and
+// intents are applied in order, so a replay always arrives at exactly the
+// CR's current revision carrying identical fields. Anything else — a
+// strictly-behind revision, or an equal revision describing different
+// intent fields — means the stream the row serves diverged from what the
+// CR already applied.
+func intentFenceDrifted(ws *cdiv1.Workspace, in Intent) bool {
+	rev := int64(in.Revision)
+	if rev != ws.Spec.IntentRevision {
+		return rev < ws.Spec.IntentRevision
+	}
+	return in.DesiredState != string(ws.Spec.DesiredState) ||
+		in.RuntimeGeneration != ws.Spec.RuntimeGeneration
+}
+
+// markIntentBehind records the drift marker on the CR, writing only when
+// the recorded pair changed (each dropped intent is a real stream event,
+// not a poll). The intent itself is still dropped — fencing is unchanged.
+func (a *K8sApplier) markIntentBehind(ctx context.Context, ws *cdiv1.Workspace, in Intent) error {
+	raw, err := json.Marshal(IntentBehindMark{
+		RowRevision: int64(in.Revision),
+		CRRevision:  ws.Spec.IntentRevision,
+	})
+	if err != nil {
+		return nil
+	}
+	if ws.Annotations[AnnotationIntentBehind] == string(raw) {
+		return nil
+	}
+	setCRAnnotation(ws, AnnotationIntentBehind, string(raw))
+	return a.client.Update(ctx, ws)
+}
+
+// clearIntentBehind removes the drift marker; called on every forward
+// apply so the first intent the CR adopts again realigns the marker with
+// the stream.
+func clearIntentBehind(ws *cdiv1.Workspace) {
+	delete(ws.Annotations, AnnotationIntentBehind)
+}
+
+// PlatformID is the platform workspace identity the API mints
+// ("ws_<hex>", stored as workspaces.id). It is stamped into the
+// workspace-uid label ON THE Workspace CR and is what every broker/DB seam
+// (tickets, leases, revocations, stop intents) routes on. It is a
+// DIFFERENT identity from the Workspace CR's metadata.uid — the runtime
+// backend names child objects from the CR UID and stamps the same label
+// key with it on those children (see linux.CRUID). The two identities
+// never convert implicitly.
+type PlatformID string
+
+// ErrCRConflict is returned when a Workspace CR with the deterministic
+// name exists but belongs to a different request (name reuse across
+// workspaces must never silently adopt foreign resources).
+var ErrCRConflict = errors.New("workspace CR exists with different request ID")
+
+// ErrTemplateRepointBlocked is returned when a start intent carries a
+// template re-point but the Workspace CR is not Stopped: the CEL rule
+// allows the move only from Stopped, so the apply is refused — the intent
+// retries (a later stop makes the CR Stopped) or quarantines visibly via
+// MaxIntentApplyAttempts — rather than silently dropped, which would
+// diverge the row (already on the new revision) from the CR.
+var ErrTemplateRepointBlocked = errors.New("template re-point refused: workspace CR is not Stopped")
+
+// WorkspaceCRName is the deterministic, DNS-1123-safe CR name for a
+// platform workspace ID (ws_<hex> -> ws-<hex>).
+func WorkspaceCRName(workspaceUID PlatformID) string {
+	return strings.ToLower(strings.ReplaceAll(string(workspaceUID), "_", "-"))
+}
+
+// K8sApplier is the production WorkspaceApplier: it projects intents into
+// Workspace CRs via a controller-runtime client. End users never hold
+// credentials that can write CRs; this runs under the API/operator service
+// account.
+type K8sApplier struct {
+	client  client.Client
+	tenants TenantNamespaces
+	log     *slog.Logger
+}
+
+// NewK8sApplier builds an applier; tenants maps tenantID -> namespace.
+func NewK8sApplier(c client.Client, tenants TenantNamespaces) *K8sApplier {
+	return &K8sApplier{client: c, tenants: tenants}
+}
+
+// WithLogger attaches a logger for apply-time refusals; nil keeps
+// slog.Default.
+func (a *K8sApplier) WithLogger(l *slog.Logger) *K8sApplier {
+	a.log = l
+	return a
+}
+
+// Apply implements WorkspaceApplier. All operations are idempotent:
+// create replays succeed when the existing CR carries the same request ID
+// and fencing numbers; start/stop never move spec.intentRevision
+// backwards; delete tolerates NotFound.
+func (a *K8sApplier) Apply(ctx context.Context, in Intent) error {
+	ns, ok := a.tenants.Namespace(in.TenantID)
+	if !ok {
+		return fmt.Errorf("apply %s: no namespace for tenant %q", in.Kind, in.TenantID)
+	}
+	name := WorkspaceCRName(in.WorkspaceUID)
+	key := client.ObjectKey{Namespace: ns, Name: name}
+
+	switch in.Kind {
+	case IntentCreate:
+		return a.applyCreate(ctx, key, in)
+	case IntentStart, IntentStop:
+		return a.applySignal(ctx, key, in)
+	case IntentDelete:
+		return a.applyDelete(ctx, key, in)
+	}
+	return fmt.Errorf("apply: unknown kind %q", in.Kind)
+}
+
+func (a *K8sApplier) applyCreate(ctx context.Context, key client.ObjectKey, in Intent) error {
+	ws := &cdiv1.Workspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      key.Name,
+			Namespace: key.Namespace,
+			Labels: map[string]string{
+				LabelWorkspaceUID: string(in.WorkspaceUID),
+				LabelTenant:       in.TenantID,
+			},
+			Annotations: map[string]string{
+				AnnotationRequestID: in.RequestID,
+			},
+		},
+		Spec: cdiv1.WorkspaceSpec{
+			TemplateRef: cdiv1.TemplateReference{Name: in.Spec.TemplateName},
+			OwnerSubject: cdiv1.OwnerSubject{
+				Issuer:  in.Spec.OwnerIssuer,
+				Subject: in.Spec.OwnerSubject,
+			},
+			DesiredState:      cdiv1.DesiredState(in.DesiredState),
+			DataPolicy:        cdiv1.DataPolicy(in.Spec.DataPolicy),
+			RuntimeGeneration: in.RuntimeGeneration,
+			IntentRevision:    int64(in.Revision),
+			SessionPolicy:     sessionPolicySpec(in.Spec.SessionPolicy),
+		},
+	}
+	if in.Spec.ImageBuiltAt != "" {
+		ws.Annotations[AnnotationWorkspaceImageBuiltAt] = in.Spec.ImageBuiltAt
+	}
+	for k, v := range in.CRAnnotations {
+		ws.Annotations[k] = v
+	}
+	err := a.client.Create(ctx, ws)
+	switch {
+	case err == nil:
+		return nil
+	case apierrors.IsAlreadyExists(err):
+		// Replay: converge only if this is the same request.
+		var existing cdiv1.Workspace
+		if err := a.client.Get(ctx, key, &existing); err != nil {
+			return err
+		}
+		if existing.Labels[LabelWorkspaceUID] != string(in.WorkspaceUID) ||
+			existing.Annotations[AnnotationRequestID] != in.RequestID {
+			return ErrCRConflict
+		}
+		return a.patchForward(ctx, &existing, in)
+	default:
+		return fmt.Errorf("apply create %s: %w", key, err)
+	}
+}
+
+// applySignal forwards desiredState/runtimeGeneration/intentRevision for
+// start and stop, never moving intentRevision backwards. A start intent
+// that carries a template name re-points spec.templateRef at the newer
+// revision in the same write — allowed by CEL only while the CR was
+// Stopped — and refreshes the image-built-at annotation to match.
+func (a *K8sApplier) applySignal(ctx context.Context, key client.ObjectKey, in Intent) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var ws cdiv1.Workspace
+		err := a.client.Get(ctx, key, &ws)
+		if apierrors.IsNotFound(err) {
+			// Nothing to signal (e.g. delete raced ahead and closed the
+			// stream): applying is a no-op.
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if int64(in.Revision) <= ws.Spec.IntentRevision {
+			// Stale or already applied — still dropped, but a drifted
+			// stream is recorded on the CR so the operator can surface
+			// IntentBehind instead of the drop staying silent.
+			if intentFenceDrifted(&ws, in) {
+				return a.markIntentBehind(ctx, &ws, in)
+			}
+			return nil
+		}
+		if in.Kind == IntentStart && in.Spec.TemplateName != "" {
+			if ws.Spec.DesiredState != cdiv1.DesiredStateStopped {
+				// CEL forbids the move while the CR is wanted Running —
+				// refuse (retry) rather than drop it silently: the row is
+				// already on the carried revision, so a quiet no-op would
+				// diverge row and CR permanently.
+				log := a.log
+				if log == nil {
+					log = slog.Default()
+				}
+				log.Error("template re-point refused: workspace CR not Stopped",
+					"workspace", key.String(),
+					"intentRevision", in.Revision, "crIntentRevision", ws.Spec.IntentRevision,
+					"carriedTemplate", in.Spec.TemplateName,
+					"currentTemplateRef", ws.Spec.TemplateRef.Name,
+					"desiredState", ws.Spec.DesiredState)
+				return ErrTemplateRepointBlocked
+			}
+			ws.Spec.TemplateRef.Name = in.Spec.TemplateName
+			if in.Spec.ImageBuiltAt != "" {
+				setCRAnnotation(&ws, AnnotationWorkspaceImageBuiltAt, in.Spec.ImageBuiltAt)
+			} else {
+				delete(ws.Annotations, AnnotationWorkspaceImageBuiltAt)
+			}
+		}
+		if in.Kind == IntentStart && in.Spec.SessionPolicy != nil {
+			// The resolved policy is re-stamped at every start so a
+			// tightened ceiling lands on the pod's next boot (ADR 0009 §3).
+			ws.Spec.SessionPolicy = sessionPolicySpec(in.Spec.SessionPolicy)
+		}
+		ws.Spec.DesiredState = cdiv1.DesiredState(in.DesiredState)
+		if in.RuntimeGeneration > ws.Spec.RuntimeGeneration {
+			ws.Spec.RuntimeGeneration = in.RuntimeGeneration
+		}
+		ws.Spec.IntentRevision = int64(in.Revision)
+		clearIntentBehind(&ws)
+		return a.client.Update(ctx, &ws)
+	})
+}
+
+// setCRAnnotation sets a single annotation on a Workspace CR.
+func setCRAnnotation(ws *cdiv1.Workspace, key, value string) {
+	if ws.Annotations == nil {
+		ws.Annotations = map[string]string{}
+	}
+	ws.Annotations[key] = value
+}
+
+// sessionPolicySpec maps the intent's resolved session policy onto the
+// Workspace CR's spec.sessionPolicy — the required field the operator
+// reads at pod build. A nil intent policy maps to a zero spec: the field
+// is required, so admission rejects a CR stamped by an intent that
+// skipped resolution instead of silently running unpoliced.
+func sessionPolicySpec(sp *SessionPolicy) cdiv1.SessionPolicySpec {
+	if sp == nil {
+		return cdiv1.SessionPolicySpec{FileTransfer: cdiv1.FileTransferDisabled}
+	}
+	ft := sp.FileTransfer
+	if ft == "" {
+		ft = cdiv1.FileTransferDisabled
+	}
+	max := sp.MaxFileBytes
+	if ft == cdiv1.FileTransferDisabled {
+		max = 0
+	}
+	return cdiv1.SessionPolicySpec{
+		Clipboard:    cdiv1.ClipboardPolicy(sp.Clipboard),
+		FileTransfer: ft,
+		MaxFileBytes: max,
+	}
+}
+
+func (a *K8sApplier) applyDelete(ctx context.Context, key client.ObjectKey, in Intent) error {
+	var ws cdiv1.Workspace
+	err := a.client.Get(ctx, key, &ws)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if ws.Labels[LabelWorkspaceUID] != string(in.WorkspaceUID) {
+		return ErrCRConflict
+	}
+	if err := a.client.Delete(ctx, &ws); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("apply delete %s: %w", key, err)
+	}
+	return nil
+}
+
+// patchForward merges an intent into an existing CR during create replay:
+// when the CR is behind (e.g. create applied but not fully persisted, or a
+// retry after partial failure), move the fencing numbers forward. A CR
+// already at or beyond the intent revision is left untouched.
+func (a *K8sApplier) patchForward(ctx context.Context, ws *cdiv1.Workspace, in Intent) error {
+	if int64(in.Revision) <= ws.Spec.IntentRevision {
+		if intentFenceDrifted(ws, in) {
+			return a.markIntentBehind(ctx, ws, in)
+		}
+		return nil
+	}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := a.client.Get(ctx, client.ObjectKeyFromObject(ws), ws); err != nil {
+			return err
+		}
+		if int64(in.Revision) <= ws.Spec.IntentRevision {
+			if intentFenceDrifted(ws, in) {
+				return a.markIntentBehind(ctx, ws, in)
+			}
+			return nil
+		}
+		ws.Spec.DesiredState = cdiv1.DesiredState(in.DesiredState)
+		if in.RuntimeGeneration > ws.Spec.RuntimeGeneration {
+			ws.Spec.RuntimeGeneration = in.RuntimeGeneration
+		}
+		if in.Spec.SessionPolicy != nil {
+			ws.Spec.SessionPolicy = sessionPolicySpec(in.Spec.SessionPolicy)
+		}
+		ws.Spec.IntentRevision = int64(in.Revision)
+		clearIntentBehind(ws)
+		return a.client.Update(ctx, ws)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Template catalog backed by WorkspaceTemplate CRs (read-only).
+// ---------------------------------------------------------------------------
+
+// TemplateCatalogEntry is a published template revision offered to users.
+type TemplateCatalogEntry struct {
+	ID          string // public ID: "tpl_" + CR name
+	Name        string // catalog (family) name
+	Description string
+	Revision    int64
+	// RevisionLabel is the raw spec.revision identifier ("2026-10-b"); the
+	// numeric Revision above parses only a leading integer prefix.
+	RevisionLabel     string
+	Runtime           string
+	Experience        string
+	CPUMillis         int64
+	MemoryBytes       int64
+	DiskBytes         int64
+	IdleTimeout       time.Duration
+	DisconnectGrace   time.Duration
+	MaxRunning        time.Duration
+	DataPolicyDefault string
+	ClipboardPolicy   string
+	// FileTransferPolicy is the revision's spec.fileTransferPolicy leg the
+	// session-policy meet is computed against (F4); "" for entries that do
+	// not declare one, read as Disabled.
+	FileTransferPolicy string
+	NetworkProfile     string
+	// The remaining security-relevant dimensions a family re-point must
+	// not silently change: the E2 compatibility guard (revisionIncompatible)
+	// compares them verbatim and refuses the move when any differs.
+	Adapter   string               // spec.linux.adapter; "" for non-Linux runtimes
+	HostUsers *bool                // spec.linux.hostUsers
+	Placement *cdiv1.PlacementSpec // spec.placement
+	// SeccompProfile/AppArmorProfile carry the raw confinement annotation
+	// values the backend honors (empty when the template declares none).
+	SeccompProfile  string
+	AppArmorProfile string
+	// ImageUpdate is the revision's lifecycle.imageUpdate policy
+	// (OnStart | Pinned); the CRD defaults it to OnStart, and callers test
+	// only for Pinned.
+	ImageUpdate string
+	PublishedAt time.Time
+	// ImageBuiltAt is the raw image-built-at annotation value (RFC 3339
+	// when well formed); empty when the template carries no annotation.
+	ImageBuiltAt string
+	// ImageEngines carries the browser engine versions baked into the
+	// runtime image (the image-chromium/image-firefox annotations, e.g.
+	// {"chromium": "154.0.8037.92", "firefox": "153.4.0esr"}); nil when the
+	// template declares none.
+	ImageEngines map[string]string
+}
+
+// ErrTemplateNotFound means a template or template family does not resolve
+// in the tenant's catalog.
+var ErrTemplateNotFound = errors.New("template not found")
+
+// K8sTemplateCatalog resolves/list templates from WorkspaceTemplate CRs in
+// the tenant's namespace. Public IDs are "tpl_" + CR name.
+type K8sTemplateCatalog struct {
+	client  client.Client
+	tenants TenantNamespaces
+}
+
+// NewK8sTemplateCatalog builds the catalog reader.
+func NewK8sTemplateCatalog(c client.Client, tenants TenantNamespaces) *K8sTemplateCatalog {
+	return &K8sTemplateCatalog{client: c, tenants: tenants}
+}
+
+// LabelCatalogName ties the immutable revision objects of one logical
+// template together. Seeded templates are published as
+// "<name>-<hash8>" objects (spec is CEL-immutable), so the catalog
+// resolves the stable public id tpl_<name> to the newest published
+// revision and lists one entry per catalog name.
+const LabelCatalogName = "workspaces.cdi.tinyorbit.vn/catalog-name"
+
+// AnnotationImageBuiltAt carries the runtime image's build timestamp
+// (RFC 3339) on a WorkspaceTemplate — rendered from images.<key>.builtAt
+// or the seeded entry's imageBuiltAt. The API surfaces it as the
+// imageBuiltAt/imageStale view fields; it is advisory only (D28).
+const AnnotationImageBuiltAt = "workspaces.cdi.tinyorbit.vn/image-built-at"
+
+// AnnotationWorkspaceImageBuiltAt is the same annotation on a Workspace CR:
+// Create copies the template's value so the image age travels with the
+// workspace and survives the template revision being superseded.
+const AnnotationWorkspaceImageBuiltAt = AnnotationImageBuiltAt
+
+// The image-<engine> annotations carry the browser engine versions the
+// runtime image was built with, rendered from images.<key>.engines.*. They
+// surface on the template view as imageEngines so the stale-image view
+// shows both engines (backlog 14).
+const (
+	AnnotationImageChromium = "workspaces.cdi.tinyorbit.vn/image-chromium"
+	AnnotationImageFirefox  = "workspaces.cdi.tinyorbit.vn/image-firefox"
+)
+
+// TemplateCRName converts a public template ID to its CR name; ok=false
+// when id lacks the tpl_ prefix.
+func TemplateCRName(id string) (name string, ok bool) {
+	if !strings.HasPrefix(id, "tpl_") {
+		return "", false
+	}
+	return id[len("tpl_"):], true
+}
+
+// catalogName returns the logical template name: the catalog-name label
+// when published as an immutable revision, otherwise the object name
+// itself (admin-published singletons).
+func catalogName(t *cdiv1.WorkspaceTemplate) string {
+	if n := t.Labels[LabelCatalogName]; n != "" {
+		return n
+	}
+	return t.Name
+}
+
+// latestRevision picks the newest revision: latest creationTimestamp,
+// tie-broken by name for determinism.
+func latestRevision(items []cdiv1.WorkspaceTemplate) *cdiv1.WorkspaceTemplate {
+	var best *cdiv1.WorkspaceTemplate
+	for i := range items {
+		t := &items[i]
+		if best == nil ||
+			t.CreationTimestamp.After(best.CreationTimestamp.Time) ||
+			(t.CreationTimestamp.Equal(&best.CreationTimestamp) && t.Name > best.Name) {
+			best = t
+		}
+	}
+	return best
+}
+
+// Get returns the template for the public ID, or nil when unknown. An ID
+// naming a catalog base (tpl_<name>) resolves to the newest published
+// revision of that name — including after an upgrade swapped the
+// immutable revision object.
+func (c *K8sTemplateCatalog) Get(ctx context.Context, tenantID, id string) (*TemplateCatalogEntry, error) {
+	ns, ok := c.tenants.Namespace(tenantID)
+	if !ok {
+		return nil, fmt.Errorf("no namespace for tenant %q", tenantID)
+	}
+	name, ok := TemplateCRName(id)
+	if !ok {
+		return nil, nil
+	}
+	// Not a live object name: the shared resolver falls back to the
+	// catalog-name label so tpl_<name> resolves through revision churn.
+	tpl, err := ResolveTemplateByName(ctx, c.client, ns, name)
+	switch {
+	case apierrors.IsNotFound(err):
+		return nil, nil
+	case err != nil:
+		return nil, err
+	}
+	e := templateEntry(tpl)
+	return &e, nil
+}
+
+// NewestInFamily returns the newest published revision of the template
+// family (catalog name) family belongs to — the same resolution List
+// applies per catalog name, restricted to one family. family is the
+// catalog-name label value; an unlabeled singleton template is its own
+// family and resolves by object name. ErrTemplateNotFound when no live
+// revision of the family exists.
+//
+// Precedence differs from ResolveTemplateByName on purpose: family
+// membership is defined by the catalog-name label, so labeled revisions
+// are considered first and the exact-named object is only the
+// unlabeled-singleton fallback — while ResolveTemplateByName (what
+// spec.templateRef points at) prefers the exact object name. The two
+// diverge only when an unlabeled object shares its name with a labeled
+// family (object "linuxdesk" next to labeled "linuxdesk-*" revisions):
+// templateRef resolves the singleton, the family resolves the newest
+// labeled revision. The chart never renders that collision.
+func (c *K8sTemplateCatalog) NewestInFamily(ctx context.Context, tenantID, family string) (TemplateCatalogEntry, error) {
+	ns, ok := c.tenants.Namespace(tenantID)
+	if !ok {
+		return TemplateCatalogEntry{}, fmt.Errorf("no namespace for tenant %q", tenantID)
+	}
+	var list cdiv1.WorkspaceTemplateList
+	if err := c.client.List(ctx, &list, client.InNamespace(ns),
+		client.MatchingLabels{LabelCatalogName: family}); err != nil {
+		return TemplateCatalogEntry{}, err
+	}
+	latest := latestRevision(list.Items)
+	if latest == nil {
+		// No labeled revisions: the family may be an unlabeled
+		// admin-published singleton whose object name IS the family.
+		var tpl cdiv1.WorkspaceTemplate
+		err := c.client.Get(ctx, client.ObjectKey{Namespace: ns, Name: family}, &tpl)
+		switch {
+		case apierrors.IsNotFound(err):
+			return TemplateCatalogEntry{}, fmt.Errorf("%w: family %q", ErrTemplateNotFound, family)
+		case err != nil:
+			return TemplateCatalogEntry{}, err
+		}
+		latest = &tpl
+	}
+	return templateEntry(latest), nil
+}
+
+// List returns the catalog the tenant sees: one entry per logical
+// template — the newest published revision when several immutable
+// revision objects share a catalog name.
+func (c *K8sTemplateCatalog) List(ctx context.Context, tenantID, runtimeFilter string) ([]TemplateCatalogEntry, error) {
+	ns, ok := c.tenants.Namespace(tenantID)
+	if !ok {
+		return nil, fmt.Errorf("no namespace for tenant %q", tenantID)
+	}
+	var list cdiv1.WorkspaceTemplateList
+	if err := c.client.List(ctx, &list, client.InNamespace(ns)); err != nil {
+		return nil, err
+	}
+	byCatalog := map[string][]cdiv1.WorkspaceTemplate{}
+	order := []string{}
+	for i := range list.Items {
+		t := &list.Items[i]
+		cn := catalogName(t)
+		if _, seen := byCatalog[cn]; !seen {
+			order = append(order, cn)
+		}
+		byCatalog[cn] = append(byCatalog[cn], *t)
+	}
+	var out []TemplateCatalogEntry
+	for _, cn := range order {
+		e := templateEntry(latestRevision(byCatalog[cn]))
+		if runtimeFilter != "" && e.Runtime != runtimeFilter {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out, nil
+}
+
+func templateEntry(t *cdiv1.WorkspaceTemplate) TemplateCatalogEntry {
+	var rev int64
+	fmt.Sscanf(t.Spec.Revision, "%d", &rev)
+	e := TemplateCatalogEntry{
+		ID:            "tpl_" + t.Name,
+		Name:          catalogName(t),
+		Revision:      rev,
+		RevisionLabel: t.Spec.Revision,
+		Runtime:       string(t.Spec.Runtime),
+		Experience:    string(t.Spec.Experience),
+		ImageUpdate:   string(t.Spec.Lifecycle.ImageUpdate),
+		PublishedAt:   t.CreationTimestamp.Time,
+	}
+	e.CPUMillis = t.Spec.Resources.CPU.MilliValue()
+	e.MemoryBytes = t.Spec.Resources.Memory.Value()
+	e.DiskBytes = t.Spec.Resources.Storage.Value()
+	e.IdleTimeout = t.Spec.Lifecycle.IdleTimeout.Duration
+	e.DisconnectGrace = t.Spec.Lifecycle.DisconnectTimeout.Duration
+	e.MaxRunning = t.Spec.Lifecycle.MaxDuration.Duration
+	e.DataPolicyDefault = string(t.Spec.Lifecycle.DataPolicy)
+	e.ClipboardPolicy = string(t.Spec.ClipboardPolicy)
+	e.FileTransferPolicy = string(t.Spec.FileTransferPolicy)
+	e.NetworkProfile = string(t.Spec.NetworkProfile)
+	if t.Spec.Linux != nil {
+		e.Adapter = string(t.Spec.Linux.Adapter)
+		e.HostUsers = t.Spec.Linux.HostUsers
+	}
+	e.Placement = t.Spec.Placement
+	e.SeccompProfile = t.Annotations[linux.AnnotationSeccompProfile]
+	e.AppArmorProfile = t.Annotations[linux.AnnotationAppArmorProfile]
+	e.ImageBuiltAt = t.Annotations[AnnotationImageBuiltAt]
+	if v := t.Annotations[AnnotationImageChromium]; v != "" {
+		if e.ImageEngines == nil {
+			e.ImageEngines = map[string]string{}
+		}
+		e.ImageEngines["chromium"] = v
+	}
+	if v := t.Annotations[AnnotationImageFirefox]; v != "" {
+		if e.ImageEngines == nil {
+			e.ImageEngines = map[string]string{}
+		}
+		e.ImageEngines["firefox"] = v
+	}
+	return e
+}
+
+// Vector converts catalog resources to the quota reservation vector.
+func (e TemplateCatalogEntry) Vector() ResourceVector {
+	return ResourceVector{
+		RunningSlots: 1,
+		CPUMillis:    e.CPUMillis,
+		MemoryBytes:  e.MemoryBytes,
+		DiskBytes:    e.DiskBytes,
+	}
+}

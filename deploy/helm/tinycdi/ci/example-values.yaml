@@ -1,0 +1,220 @@
+# Full-featured example for deploy/helm/tinycdi.
+# Secrets are REFERENCED BY NAME ONLY — create them beforehand
+# (docs/runbooks/install.md). Nothing sensitive may live in this file.
+
+managedNamespaces:
+  - name: tinycdi-tenant-a
+    tenant: tenant-a
+    quota: {runningWorkspaces: 12, cpu: "16", memory: 64Gi, storage: 200Gi}
+  - name: tinycdi-tenant-b
+    tenant: tenant-b
+
+portalHost: portal.lab.example.net
+sessionDomain: session.lab.example.net
+
+oidc:
+  issuer: https://idp.lab.example.net/realms/tinycdi
+  clientID: tinycdi
+  # Pre-created Secret holding the OIDC client secret (key: client-secret).
+  existingSecret: tinycdi-oidc-client
+  # Egress to the IdP. Restrict to the IdP's address space where known.
+  egressCIDRs: [0.0.0.0/0]
+  port: 443
+
+database:
+  # Pre-created Secret holding the PostgreSQL DSN (key: url).
+  existingSecret: tinycdi-backend-db
+  port: 5432
+  allowedPeers:
+    - ipBlock: {cidr: 10.20.30.40/32}
+
+# Company-registry style pull: every repository joined under this registry;
+# per-image .registry would win where set.
+global:
+  imageRegistry: registry.lab.example.net
+  imagePullSecrets:
+    - name: lab-pull-secret
+
+images:
+  backend:
+    repository: tinycdi/backend
+    digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
+  operator:
+    repository: tinycdi/operator
+    digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
+  frontend:
+    repository: tinycdi/frontend
+    digest: sha256:4444444444444444444444444444444444444444444444444444444444444444
+  linuxBase:                     # the profiles' base; pinned, never pulled by the chart
+    repository: tinycdi/linux-base
+    digest: sha256:6666666666666666666666666666666666666666666666666666666666666666
+  linuxDesktop:
+    repository: tinycdi/linux-desktop
+    digest: sha256:5555555555555555555555555555555555555555555555555555555555555555
+  browser:
+    repository: tinycdi/browser
+    digest: sha256:6666666666666666666666666666666666666666666666666666666666666666
+
+# Adapter init image for spec.linux.adapter=kasm templates — opt-in via
+# enabled (the operator flag renders only then), and the image must be
+# digest-pinned or the render fails; a seeded kasm template needs both.
+kasmAdapter:
+  enabled: true
+  image:
+    repository: tinycdi/kasm-adapter
+    digest: sha256:7777777777777777777777777777777777777777777777777777777777777777
+
+backend:
+  replicas: 2
+  pdb: {enabled: true, minAvailable: 1}
+  podAnnotations: {example.com/team: platform}
+  loginKeys:
+    existingSecret: tinycdi-backend-login-keys
+  tls:
+    internal:
+      existingSecret: tinycdi-backend-internal-tls
+  clientCA:
+    existingSecret: tinycdi-extra-ca
+  extraCA:
+    existingSecret: tinycdi-extra-ca
+  extraPortalOrigins:
+    - https://alt.portal.example.net
+  # CIDRs of the edge proxies whose X-Forwarded-For claims are trusted
+  # (per-client rate limits + runtime-bound headers; E7/TM-32).
+  trustedProxies: ["10.99.0.0/16", "fd00::/8"]
+  metrics:
+    enabled: true
+  # /v1/control/* bearer token (optional — control routes close without it).
+  controlToken:
+    existingSecret: tinycdi-backend-control-token
+    key: token
+
+frontend:
+  tls:
+    existingSecret: tinycdi-frontend-tls
+
+operator:
+  internetExceptCIDRs: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16]
+  brokerClient:
+    enabled: true
+    ca:
+      existingSecret: tinycdi-extra-ca
+      key: ca.crt
+    mtls:
+      existingSecret: tinycdi-operator-mtls
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+  tls:
+    existingSecret: tinycdi-ingress-tls
+
+serviceMonitor:
+  enabled: true
+  labels: {release: prometheus}
+  interval: 30s
+
+networkPolicy:
+  apiServerPeers:
+    - ipBlock: {cidr: 10.96.0.1/32}
+  apiServerPort: 443
+  prometheusPeers:
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: monitoring}
+
+storageClass: longhorn
+
+templates:
+  - name: linuxdesk1
+    namespace: tinycdi-tenant-a
+    image: linuxDesktop          # resolved from .Values.images (digest-pinned)
+    annotations:
+      workspaces.cdi.tinyorbit.vn/display-name: "Linux Desktop"
+    spec:
+      revision: "2026-10-a"
+      runtime: LinuxContainer
+      experience: Desktop
+      linux: {}                  # image injected from `image:` above
+      resources: {cpu: "1", memory: 2Gi, storage: 5Gi}
+      bootDeadline: 5m
+      networkProfile: Isolated
+      clipboardPolicy: Disabled
+      lifecycle:
+        idleTimeout: 30m
+        disconnectTimeout: 5m
+        maxDuration: 8h
+        dataPolicy: Ephemeral
+  - name: browser01
+    namespace: tinycdi-tenant-a
+    image: browser
+    # Per-template Localhost seccomp/AppArmor profiles (node profiles must
+    # be pre-loaded on the nodes — see deploy/node-profiles/README.md).
+    seccompProfile: localhost/profiles/chromium-userns.json
+    appArmorProfile: tinycdi-browser
+    annotations:
+      workspaces.cdi.tinyorbit.vn/display-name: "Browser"
+    spec:
+      revision: "2026-10-a"
+      runtime: LinuxContainer
+      experience: Browser
+      linux: {}
+      placement:
+        nodeSelector: {workload: runtime}
+      resources: {cpu: "1", memory: 2Gi, storage: 5Gi}
+      bootDeadline: 5m
+      networkProfile: Isolated
+      clipboardPolicy: Disabled
+      lifecycle:
+        idleTimeout: 30m
+        disconnectTimeout: 5m
+        maxDuration: 8h
+        dataPolicy: Ephemeral
+  # Approach A (docs/kasm-images.md): an UNMODIFIED kasmweb/* image behind
+  # the injected adapter. The image ref is a literal digest pin (Docker
+  # Hub path — NOT resolved through .Values.images), and the same
+  # Localhost seccomp/AppArmor node profiles the tcdi browser template
+  # uses apply (the bundled engine still needs its sandbox; profiles must
+  # be pre-loaded on the nodes). The digest must stay a
+  # build/kasm-catalog.txt entry — the catalog gate (trivy + engine
+  # freshness floor) applies (.github/scripts/check-kasm-catalog.sh).
+  #
+  # E13: this is a Desktop-experience seed — kasmweb/chrome is
+  # browser-class (Chrome 154 vs the native 155 pin) but is not on
+  # kasmAdapter.browserAllowlist, which ships empty. A seeded
+  # adapter=kasm template with experience=Browser whose image is not on
+  # the allowlist fails the render. Without sessionCmd the image's own session runs; a real
+  # desktop payload is the intended non-browser use anyway.
+  - name: kasm-chromium
+    namespace: tinycdi-tenant-a
+    # kasmweb/chrome:1.19.0-rolling-weekly @ 2026-10-07 — re-resolve on
+    # weekly bumps; Google Chrome 154.0.8037.97.
+    image: kasmweb/chrome@sha256:4999d22efdde2ae7e432c6eb969685e578498c83491e6ef8a0853adc1324003b
+    seccompProfile: localhost/profiles/chromium-userns.json
+    appArmorProfile: tinycdi-browser
+    annotations:
+      workspaces.cdi.tinyorbit.vn/display-name: "Kasm Chromium"
+    spec:
+      revision: "2026-10-a"
+      runtime: LinuxContainer
+      experience: Desktop
+      linux:
+        adapter: kasm
+      resources: {cpu: "1", memory: 2Gi, storage: 5Gi}
+      bootDeadline: 5m
+      networkProfile: Isolated
+      clipboardPolicy: Disabled
+      lifecycle:
+        idleTimeout: 30m
+        disconnectTimeout: 5m
+        maxDuration: 8h
+        dataPolicy: Ephemeral
+
+# ci/dev clusters (kind) carry no dedicated workspace pool — opt out of
+# the default dedicated placement. Production values should keep
+# runtime.placement.allowSharedNodes: false and prepare the pool per
+# docs/runbooks/install.md "Workspace node pool".
+runtime:
+  placement:
+    allowSharedNodes: true
