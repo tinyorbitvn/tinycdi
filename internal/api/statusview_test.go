@@ -741,7 +741,7 @@ func TestStatusProjection_EndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cache: %v", err)
 	}
-	sv, err := NewK8sStatusView(ctx, kcache)
+	sv, err := NewK8sStatusView(ctx, kcache, nil)
 	if err != nil {
 		t.Fatalf("status view: %v", err)
 	}

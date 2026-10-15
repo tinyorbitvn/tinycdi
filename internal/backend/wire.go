@@ -15,7 +15,6 @@ import (
 	"os"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -41,6 +40,7 @@ import (
 	"github.com/tinyorbitvn/tinycdi/internal/sessionhost"
 	"github.com/tinyorbitvn/tinycdi/internal/store"
 	"github.com/tinyorbitvn/tinycdi/internal/tlsreload"
+	"github.com/tinyorbitvn/tinycdi/internal/watchhealth"
 )
 
 // defaultMergedGatewayID is the session-gateway identity when -gateway-id
@@ -325,22 +325,21 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 		}
 	})
 
-	// Binding source: an informer cache over Workspace CRs, scoped to the
-	// managed tenant namespaces. Its resync period doubles as the liveness
-	// heartbeat — must stay well under broker.MaxBindingAge (15 s) so a
-	// stalled watch stops issuance (fail closed).
-	bindingResync := 5 * time.Second
-	// The status view reads its watch health from the cache's list/watch
-	// failures; it is created after the cache, so the handler reaches it
-	// through a pointer set before the cache starts.
-	var statusViewRef atomic.Pointer[api.K8sStatusView]
+	// Workspace informer cache, scoped to the managed tenant namespaces,
+	// shared by the broker's binding source and the API's status view. Both
+	// read freshness from ONE watchhealth.Tracker: fresh while an uncached
+	// metadata list (every watchProbeEvery) matches the cache and the watch
+	// reports no lasting failures, so a stalled watch stops issuance within
+	// broker.MaxBindingAge (15 s, fail closed). No SyncPeriod override:
+	// resync replays prove nothing about the watch, and every handler on
+	// this informer (settle trigger, boot recorder) has its own catch-all.
+	const watchProbeEvery = 5 * time.Second
+	watch := &watchhealth.Tracker{}
 	cacheOpts := crcache.Options{
-		Scheme: scheme, SyncPeriod: &bindingResync,
+		Scheme: scheme,
 		DefaultWatchErrorHandler: func(ctx context.Context, r *toolscache.Reflector, err error) {
 			toolscache.DefaultWatchErrorHandler(ctx, r, err)
-			if sv := statusViewRef.Load(); sv != nil {
-				sv.NoteWatchError(r.TypeDescription(), err)
-			}
+			watch.NoteWatchError(time.Now(), r.TypeDescription(), err)
 		},
 	}
 	if len(tenants) > 0 {
@@ -353,7 +352,40 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	if err != nil {
 		return fmt.Errorf("workspace cache: %w", err)
 	}
-	bindings, err := broker.NewK8sBindingSource(ctx, kcache)
+	wsInformer, err := kcache.GetInformer(ctx, &cdiv1.Workspace{})
+	if err != nil {
+		return fmt.Errorf("workspace informer: %w", err)
+	}
+	watchReg, err := wsInformer.AddEventHandler(watch.Handler())
+	if err != nil {
+		return fmt.Errorf("watch health: %w", err)
+	}
+	// Freshness starts once the Workspace informer holds its initial list,
+	// not when WaitForCacheSync (every informer, polled every 100 ms)
+	// returns: a replica serves connects as soon as its bindings are known.
+	watch.SyncedWhen(watchReg.HasSynced)
+	// The consistency probe gets its own client and rate limit: on kc's
+	// client-go default (QPS 5, burst 10) a probe over more than a handful
+	// of namespaces, or any other kc traffic, would wait on the limiter
+	// until every probe failed and the broker refused all connects with no
+	// real outage. A probe is one list per namespace (plus a page per 500
+	// Workspaces), at most watchhealth.ProbeParallelism in flight: burst 100
+	// sends a probe of up to 100 namespaces unthrottled, and QPS 50
+	// sustains 250 namespace lists per 5 s interval — far above the
+	// steady N/5 req/s, while API Priority and Fairness still protects the
+	// API server.
+	probeCfg := rest.CopyConfig(rcfg)
+	probeCfg.QPS, probeCfg.Burst = 50, 100
+	probeKC, err := client.New(probeCfg, client.Options{Scheme: scheme})
+	if err != nil {
+		return fmt.Errorf("watch probe client: %w", err)
+	}
+	b.bg = append(b.bg, func(ctx context.Context) {
+		watch.Run(ctx, time.Now,
+			watchhealth.WorkspaceMetadataVersions(probeKC, slices.Sorted(maps.Keys(cacheOpts.DefaultNamespaces))),
+			kcache, watchProbeEvery, broker.MaxBindingAge)
+	})
+	bindings, err := broker.NewK8sBindingSource(ctx, kcache, watch)
 	if err != nil {
 		return fmt.Errorf("binding source: %w", err)
 	}
@@ -365,10 +397,6 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	// catch-all, so a lost event or an early leader change only delays the
 	// release back to the tick.
 	settle := provisioning.NewSettleTrigger()
-	wsInformer, err := kcache.GetInformer(ctx, &cdiv1.Workspace{})
-	if err != nil {
-		return fmt.Errorf("workspace informer: %w", err)
-	}
 	if _, err := wsInformer.AddEventHandler(settle.Handler()); err != nil {
 		return fmt.Errorf("settle trigger: %w", err)
 	}
@@ -384,18 +412,10 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	// /v1/workspaces projects observed CR phase + conditions (design §6 —
 	// without it the API only ever reports the intent-side DB phase and the
 	// portal can never offer Connect).
-	statusView, err := api.NewK8sStatusView(ctx, kcache)
+	statusView, err := api.NewK8sStatusView(ctx, kcache, watch)
 	if err != nil {
 		return fmt.Errorf("status view: %w", err)
 	}
-	statusViewRef.Store(statusView)
-	// Liveness heartbeat for an idle watch: while no Workspace changes, an
-	// uncached one-item list proves the API server still serves the
-	// resource, so a quiet tenant stays fresh and an unreachable API server
-	// does not.
-	b.bg = append(b.bg, func(ctx context.Context) {
-		statusView.RunLiveness(ctx, api.WorkspaceListProbe(kc, slices.Sorted(maps.Keys(cacheOpts.DefaultNamespaces))), bindingResync)
-	})
 	if err := registerBootRecorder(ctx, kcache, db, metrics, log); err != nil {
 		return fmt.Errorf("boot recorder: %w", err)
 	}
@@ -415,9 +435,9 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 		}
 	})
 	b.bg = append(b.bg, func(ctx context.Context) {
+		// The freshness tracker synced itself on the Workspace handler's
+		// initial list (SyncedWhen); this only gates readiness.
 		if kcache.WaitForCacheSync(ctx) {
-			bindings.MarkSynced()
-			statusView.MarkSynced()
 			b.markCacheSynced()
 		}
 	})

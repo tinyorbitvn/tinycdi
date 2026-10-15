@@ -6,75 +6,92 @@ import (
 	"sync"
 	"time"
 
-	toolscache "k8s.io/client-go/tools/cache"
 	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
 	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
+	"github.com/tinyorbitvn/tinycdi/internal/watchhealth"
 )
 
 // K8sBindingSource is the production BindingSource: it projects Workspace CR
 // status through a controller-runtime informer cache scoped to the managed
-// tenant namespaces. The cache must be configured with a resync period well
-// below MaxBindingAge so the event stream doubles as a liveness heartbeat.
+// tenant namespaces.
 //
 // Freshness contract: CurrentBinding reports ErrFreshness until the informer
-// has synced, and the returned RuntimeBinding.ObservedAt is the timestamp of
-// the last observed watch event — the broker refuses issue/renew once that
-// stamp ages past MaxBindingAge, so a stalled watch fails closed.
+// has synced and whenever the cache cannot be shown to match the API server
+// (internal/watchhealth), and the returned RuntimeBinding.ObservedAt is the
+// last time it was shown to — the broker refuses issue/renew once that
+// stamp ages past MaxBindingAge, so a stalled watch fails closed. Informer
+// events, resync replays included, are never a heartbeat.
+//
+// In the backend the Tracker is shared with the API's status view and run
+// once (internal/backend); a source built without one owns its own.
 type K8sBindingSource struct {
 	cache crcache.Cache
+	now   func() time.Time // nil: time.Now
 
-	mu        sync.Mutex
-	synced    bool
-	lastEvent time.Time
+	mu     sync.Mutex
+	health *watchhealth.Tracker // nil until first use: a private tracker
 }
 
-// NewK8sBindingSource registers a Workspace event handler on the cache's
-// informer. The caller starts the cache and calls MarkSynced once
-// WaitForCacheSync reports true.
-func NewK8sBindingSource(ctx context.Context, c crcache.Cache) (*K8sBindingSource, error) {
+// NewK8sBindingSource builds the source over the cache's Workspace informer.
+// Production passes the backend's shared tracker, which the caller feeds:
+// Tracker.Handler on the informer with SyncedWhen on its registration, the
+// cache's watch error handler, and one Tracker.Run. nil is for tests only:
+// the source then owns a private tracker and registers its event handler
+// itself, and nothing probes it unless the test does.
+func NewK8sBindingSource(ctx context.Context, c crcache.Cache, health *watchhealth.Tracker) (*K8sBindingSource, error) {
 	inf, err := c.GetInformer(ctx, &cdiv1.Workspace{})
 	if err != nil {
 		return nil, fmt.Errorf("broker: workspace informer: %w", err)
 	}
-	s := &K8sBindingSource{cache: c}
-	if _, err := inf.AddEventHandler(toolscache.ResourceEventHandlerFuncs{
-		AddFunc:    func(interface{}) { s.note() },
-		UpdateFunc: func(_, _ interface{}) { s.note() },
-		DeleteFunc: func(interface{}) { s.note() },
-	}); err != nil {
-		return nil, fmt.Errorf("broker: informer handler: %w", err)
+	s := &K8sBindingSource{cache: c, health: health}
+	if health == nil {
+		tr := s.tracker()
+		reg, err := inf.AddEventHandler(tr.Handler())
+		if err != nil {
+			return nil, fmt.Errorf("broker: informer handler: %w", err)
+		}
+		tr.SyncedWhen(reg.HasSynced)
 	}
 	return s, nil
 }
 
-// MarkSynced records that the informer cache has completed its initial sync.
-func (s *K8sBindingSource) MarkSynced() {
+// tracker returns the source's freshness tracker, creating a private one on
+// first use.
+func (s *K8sBindingSource) tracker() *watchhealth.Tracker {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.synced = true
-	s.lastEvent = time.Now()
+	if s.health == nil {
+		s.health = &watchhealth.Tracker{}
+	}
+	return s.health
 }
 
-// note records a watch event: the informer is live and emitting.
-func (s *K8sBindingSource) note() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.synced = true
-	s.lastEvent = time.Now()
+func (s *K8sBindingSource) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}
+
+// MarkSynced records that the informer cache has completed its initial sync.
+func (s *K8sBindingSource) MarkSynced() { s.tracker().MarkSynced(s.clock()) }
+
+// NoteWatchError feeds a list/watch failure from the cache's watch error
+// handler (see watchhealth.Tracker.NoteWatchError).
+func (s *K8sBindingSource) NoteWatchError(typeDescription string, err error) {
+	s.tracker().NoteWatchError(s.clock(), typeDescription, err)
 }
 
 // CurrentBinding returns the RuntimeBinding for workspaceUID projected from
 // the cached Workspace CR. It fails with ErrFreshness when the cache has
-// never synced or has gone quiet past the freshness budget, and ErrNotFound
+// never synced or its watch is unhealthy (see K8sBindingSource), and ErrNotFound
 // when no managed Workspace carries the UID label.
 func (s *K8sBindingSource) CurrentBinding(ctx context.Context, workspaceUID PlatformID) (RuntimeBinding, error) {
-	s.mu.Lock()
-	synced, last := s.synced, s.lastEvent
-	s.mu.Unlock()
-	if !synced || time.Since(last) > MaxBindingAge {
+	fresh, last := s.tracker().Health(s.clock(), MaxBindingAge)
+	if !fresh {
 		return RuntimeBinding{}, ErrFreshness
 	}
 	var list cdiv1.WorkspaceList

@@ -415,7 +415,27 @@ Portal web (vitest under `web/tests/unit/`, Playwright under
   `sessions_test.go`, `bindings_envtest_test.go` /
   `bindings_internal_test.go`, `targets_internal_test.go` — lease
   lifecycle, fencing/freshness (TM-24), stale binding, target
-  resolution.
+  resolution. Binding freshness means the cache matches the API server
+  (TM-16): `TestK8sBindingSource_SilentStalledWatchGoesStale` (a watch
+  that stops delivering with no error, lists still succeeding and resync
+  still firing, goes stale within 15 s of an update, deletion or creation
+  it misses; the broker refuses),
+  `TestK8sBindingSource_UnreachableAPIServerGoesStale`,
+  `TestK8sBindingSource_WatchFailureStreak` (a failure streak over 15 s is
+  stale while the cache matches), `TestK8sBindingSource_InFlightChangeStaysFresh`
+  (a cache trailing a busy Workspace by one interval stays fresh),
+  `TestK8sBindingSource_IdleHealthyWatchStaysFresh`; the envtest
+  `TestK8sBindingSource_Projection` runs the real metadata-list probe.
+  The rule lives in `internal/watchhealth` (`TestNewVersion_ResyncIsNoEvent`,
+  `TestWorkspaceMetadataVersions`, `TestWorkspaceMetadataVersions_Paging`,
+  `TestProbe_ManyNamespacesBehindALimiter` (client-go's default limiter
+  starves the probe; the probe client's does not),
+  `TestProbe_SlowListWithinBudget`, `TestProbe_UnevenListLatency`,
+  `TestProbe_PendingSurvivesFailedProbe`, `TestSyncedWhen_HandlerRegistration`)
+  and the API status view applies it too
+  (`TestK8sStatusView_SilentStalledWatchGoesStale`,
+  `TestK8sStatusView_IdleHealthyWatchStaysFresh`,
+  `TestK8sStatusView_InFlightChangeStaysFresh`).
 - `internal/broker/signout_test.go` — `RevokePortalSession` semantics
   (TM-07): digest-bound leases revoked with drain accounting,
   outstanding tickets revoked, redemption denied once the issuing

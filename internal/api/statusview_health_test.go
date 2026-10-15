@@ -11,27 +11,82 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	cdiv1 "github.com/tinyorbitvn/tinycdi/api/v1"
+	"github.com/tinyorbitvn/tinycdi/internal/provisioning"
+	"github.com/tinyorbitvn/tinycdi/internal/watchhealth"
 )
 
-// healthView is an idle, synced status view over an empty cache with a
-// controllable clock.
-func healthView(t *testing.T) (*K8sStatusView, *time.Time) {
+// healthView is an idle, synced status view with a controllable clock over
+// a cache holding one Ready Workspace of tenant-a. The returned apiServer
+// is the API server's view the probe lists; it starts equal to the cache.
+func healthView(t *testing.T) (*K8sStatusView, *time.Time, *apiServer) {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := cdiv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
+	ws := &cdiv1.Workspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "ws-x", Namespace: "tenant-a",
+			Labels: map[string]string{
+				provisioning.LabelTenant:       "tenant-a",
+				provisioning.LabelWorkspaceUID: "ws_x",
+			},
+		},
+		Status: cdiv1.WorkspaceStatus{Phase: cdiv1.WorkspacePhaseReady},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ws).WithStatusSubresource(ws).Build()
 	clock := time.Now()
 	sv := &K8sStatusView{
-		cache: selectorCache{c: fake.NewClientBuilder().WithScheme(scheme).Build()},
+		cache: selectorCache{c: c},
 		now:   func() time.Time { return clock }, maxStale: maxObservedStale,
 		lastKnown: map[string]ObservedStatus{},
 	}
 	sv.MarkSynced()
-	return sv, &clock
+	api := &apiServer{c: c, versions: map[string]string{}}
+	api.sync(t)
+	return sv, &clock, api
+}
+
+// livenessTick runs one probe as the backend's Tracker.Run does: grace one
+// interval, timeout maxStale − interval.
+func (v *K8sStatusView) livenessTick(ctx context.Context, api watchhealth.Versions, every time.Duration) {
+	v.tracker().Probe(ctx, v.now, api, v.cache, every, v.maxStale-every)
+}
+
+// apiServer is the probe's API-server side: versions as the API server
+// reports them, or a refused connection while down.
+type apiServer struct {
+	c        client.Client // the informer cache's backing store
+	versions map[string]string
+	down     bool
+}
+
+func (a *apiServer) list(context.Context) (map[string]string, error) {
+	if a.down {
+		return nil, errors.New("dial tcp: connection refused")
+	}
+	out := make(map[string]string, len(a.versions))
+	for k, v := range a.versions {
+		out[k] = v
+	}
+	return out, nil
+}
+
+// sync makes the API server's view equal to the cache (a healthy watch).
+func (a *apiServer) sync(t *testing.T) {
+	t.Helper()
+	var l cdiv1.WorkspaceList
+	if err := a.c.List(context.Background(), &l); err != nil {
+		t.Fatal(err)
+	}
+	a.versions = map[string]string{}
+	for _, ws := range l.Items {
+		a.versions[ws.Namespace+"/"+ws.Name] = ws.ResourceVersion
+	}
 }
 
 func countsFresh(t *testing.T, sv *K8sStatusView) bool {
@@ -43,100 +98,159 @@ func countsFresh(t *testing.T, sv *K8sStatusView) bool {
 	return got.Fresh
 }
 
-var (
-	probeOK   = func(context.Context) error { return nil }
-	probeDown = func(context.Context) error { return errors.New("dial tcp: connection refused") }
-)
-
 // TestK8sStatusView_IdleHealthyWatchStaysFresh: a tenant with no
-// Workspace changes (here: none at all) emits no watch events, but while
-// the API server answers the liveness probe the overview stays fresh —
-// staleness is about watch health, not time since the last change.
+// Workspace changes emits no watch events, but while the API server's
+// metadata list matches the cache the overview stays fresh — staleness is
+// about the cache matching the API server, not time since the last change.
 func TestK8sStatusView_IdleHealthyWatchStaysFresh(t *testing.T) {
-	sv, clock := healthView(t)
+	sv, clock, api := healthView(t)
 	ctx := context.Background()
 	for i := 0; i < 24; i++ { // two minutes of silence, probed every 5 s
 		*clock = clock.Add(5 * time.Second)
-		sv.livenessTick(ctx, probeOK, 5*time.Second)
+		sv.livenessTick(ctx, api.list, 5*time.Second)
 	}
 	if !countsFresh(t, sv) {
 		t.Fatal("idle tenant with a healthy watch reported stale")
 	}
-	if obs, _ := sv.WorkspaceStatus(ctx, "tenant-a", "ws_x"); !obs.Fresh || obs.Found {
-		t.Fatalf("WorkspaceStatus on an idle healthy watch = %+v, want fresh and not found", obs)
+	if obs, _ := sv.WorkspaceStatus(ctx, "tenant-a", "ws_x"); !obs.Fresh || !obs.Found {
+		t.Fatalf("WorkspaceStatus on an idle healthy watch = %+v, want fresh and found", obs)
 	}
 	if _, fresh, _ := sv.RunningPolicies(ctx, "tenant-a"); !fresh {
 		t.Fatal("RunningPolicies on an idle healthy watch reported stale")
 	}
 }
 
+// TestK8sStatusView_SilentStalledWatchGoesStale: the watch stops
+// delivering with no error while lists succeed. A change on the API server
+// the cache never sees (an update, a new Workspace) turns the view stale
+// within maxObservedStale of the change, though the probe keeps answering.
+func TestK8sStatusView_SilentStalledWatchGoesStale(t *testing.T) {
+	cases := map[string]func(a *apiServer){
+		"updated": func(a *apiServer) { a.versions["tenant-a/ws-x"] += "1" },
+		"created": func(a *apiServer) { a.versions["tenant-a/ws-new"] = "9" },
+		"deleted": func(a *apiServer) { delete(a.versions, "tenant-a/ws-x") },
+	}
+	for name, change := range cases {
+		t.Run(name, func(t *testing.T) {
+			sv, clock, api := healthView(t)
+			ctx := context.Background()
+			change(api)
+			changedAt := *clock
+			for clock.Sub(changedAt) < maxObservedStale {
+				*clock = clock.Add(5 * time.Second)
+				sv.livenessTick(ctx, api.list, 5*time.Second)
+			}
+			if countsFresh(t, sv) {
+				t.Fatal("stalled watch: overview still fresh")
+			}
+			if obs, _ := sv.WorkspaceStatus(ctx, "tenant-a", "ws_x"); obs.Fresh {
+				t.Fatalf("stalled watch: WorkspaceStatus = %+v, want fresh:false", obs)
+			}
+			if _, fresh, _ := sv.RunningPolicies(ctx, "tenant-a"); fresh {
+				t.Fatal("stalled watch: RunningPolicies still fresh")
+			}
+			api.sync(t) // the watch recovers: the cache matches again
+			*clock = clock.Add(5 * time.Second)
+			sv.livenessTick(ctx, api.list, 5*time.Second)
+			if !countsFresh(t, sv) {
+				t.Fatal("not fresh again after the cache caught up")
+			}
+		})
+	}
+}
+
+// TestK8sStatusView_InFlightChangeStaysFresh: the API server is always one
+// change ahead of the cache, and the cache catches up within the probe
+// interval. The cache keeps moving, so the view stays fresh.
+func TestK8sStatusView_InFlightChangeStaysFresh(t *testing.T) {
+	sv, clock, api := healthView(t)
+	ctx := context.Background()
+	for i := 0; i < 12; i++ {
+		var ws cdiv1.Workspace
+		if err := api.c.Get(ctx, client.ObjectKey{Namespace: "tenant-a", Name: "ws-x"}, &ws); err != nil {
+			t.Fatal(err)
+		}
+		ws.Status.ObservedRuntimeGeneration++
+		if err := api.c.Status().Update(ctx, &ws); err != nil { // the last change arrives
+			t.Fatal(err)
+		}
+		api.versions["tenant-a/ws-x"] = ws.ResourceVersion + "-next" // the next one is in flight
+		*clock = clock.Add(5 * time.Second)
+		sv.livenessTick(ctx, api.list, 5*time.Second)
+		if !countsFresh(t, sv) {
+			t.Fatalf("in-flight change %d: overview stale", i)
+		}
+	}
+}
+
 // TestK8sStatusView_UnreachableAPIServerGoesStale: client-go retries a
 // refused watch silently, so the failing probe is what turns the view
-// stale once maxObservedStale passes without a heartbeat.
+// stale once maxObservedStale passes without a matching probe.
 func TestK8sStatusView_UnreachableAPIServerGoesStale(t *testing.T) {
-	sv, clock := healthView(t)
+	sv, clock, api := healthView(t)
 	ctx := context.Background()
+	api.down = true
 	for i := 0; i < 3; i++ { // 15 s: still inside the budget
 		*clock = clock.Add(5 * time.Second)
-		sv.livenessTick(ctx, probeDown, 5*time.Second)
+		sv.livenessTick(ctx, api.list, 5*time.Second)
 	}
 	if !countsFresh(t, sv) {
 		t.Fatal("stale before the freshness budget ran out")
 	}
 	*clock = clock.Add(5 * time.Second)
-	sv.livenessTick(ctx, probeDown, 5*time.Second)
+	sv.livenessTick(ctx, api.list, 5*time.Second)
 	if countsFresh(t, sv) {
 		t.Fatal("unreachable API server still fresh after 20 s")
 	}
-	sv.livenessTick(ctx, probeOK, 5*time.Second)
+	api.down = false
+	sv.livenessTick(ctx, api.list, 5*time.Second)
 	if !countsFresh(t, sv) {
 		t.Fatal("not fresh again after the probe recovered")
 	}
 }
 
 // TestK8sStatusView_WatchFailureStreakGoesStale: the API server answers
-// lists but the Workspace watch keeps failing — a streak older than
-// maxObservedStale is stale even with the probe succeeding; an informer
-// event ends it at once, otherwise it ends watchRetryWindow after the last
-// report.
+// lists and the cache matches, but the Workspace watch keeps failing — a
+// streak older than maxObservedStale is stale; a delivered event ends it at
+// once, otherwise it ends WatchRetryWindow after the last report.
 func TestK8sStatusView_WatchFailureStreakGoesStale(t *testing.T) {
-	sv, clock := healthView(t)
+	sv, clock, api := healthView(t)
 	ctx := context.Background()
 	fail := errors.New(`failed to list *v1.Workspace: workspaces is forbidden`)
 	tick := func() {
 		*clock = clock.Add(5 * time.Second)
-		sv.livenessTick(ctx, probeOK, 5*time.Second)
+		sv.livenessTick(ctx, api.list, 5*time.Second)
 	}
 
-	sv.NoteWatchError(workspaceTypeDescription, fail)
+	sv.NoteWatchError(watchhealth.WorkspaceTypeDescription, fail)
 	tick()
 	tick()
 	if !countsFresh(t, sv) {
 		t.Fatal("a 10 s old failure already stale: transient blips must be tolerated")
 	}
-	sv.NoteWatchError(workspaceTypeDescription, fail)
+	sv.NoteWatchError(watchhealth.WorkspaceTypeDescription, fail)
 	tick()
 	tick()
 	if countsFresh(t, sv) {
 		t.Fatal("watch failing for 20 s still fresh")
 	}
-	sv.note() // the informer delivered an event: the watch is back
+	sv.tracker().Delivered() // the informer delivered an event: the watch is back
 	if !countsFresh(t, sv) {
-		t.Fatal("an informer event did not end the streak")
+		t.Fatal("a delivered event did not end the streak")
 	}
 
-	sv.NoteWatchError(workspaceTypeDescription, fail)
+	sv.NoteWatchError(watchhealth.WorkspaceTypeDescription, fail)
 	for i := 0; i < 4; i++ {
 		tick()
 	}
 	if countsFresh(t, sv) {
 		t.Fatal("watch failing for 20 s still fresh")
 	}
-	for i := 0; i < 9; i++ { // no further report for > watchRetryWindow
+	for i := 0; i < 13; i++ { // no further report for > WatchRetryWindow
 		tick()
 	}
 	if !countsFresh(t, sv) {
-		t.Fatal("streak did not end after watchRetryWindow without a report")
+		t.Fatal("streak did not end after WatchRetryWindow without a report")
 	}
 }
 
@@ -144,57 +258,23 @@ func TestK8sStatusView_WatchFailureStreakGoesStale(t *testing.T) {
 // (EOF, expired resource version) and failures of other informers in the
 // shared cache do not start a streak.
 func TestK8sStatusView_BenignAndForeignWatchErrorsIgnored(t *testing.T) {
-	sv, clock := healthView(t)
+	sv, clock, api := healthView(t)
 	ctx := context.Background()
 	gr := schema.GroupResource{Group: cdiv1.GroupVersion.Group, Resource: "workspaces"}
+	td := watchhealth.WorkspaceTypeDescription
 	for i := 0; i < 6; i++ {
-		sv.NoteWatchError(workspaceTypeDescription, io.EOF)
-		sv.NoteWatchError(workspaceTypeDescription, io.ErrUnexpectedEOF)
-		sv.NoteWatchError(workspaceTypeDescription, apierrors.NewResourceExpired("too old resource version"))
-		sv.NoteWatchError(workspaceTypeDescription, apierrors.NewGone("gone"))
+		sv.NoteWatchError(td, io.EOF)
+		sv.NoteWatchError(td, io.ErrUnexpectedEOF)
+		sv.NoteWatchError(td, apierrors.NewResourceExpired("too old resource version"))
+		sv.NoteWatchError(td, apierrors.NewGone("gone"))
 		sv.NoteWatchError("*v1.WorkspaceTemplate", apierrors.NewForbidden(gr, "", errors.New("no")))
 		*clock = clock.Add(5 * time.Second)
-		sv.livenessTick(ctx, probeOK, 5*time.Second)
+		sv.livenessTick(ctx, api.list, 5*time.Second)
 	}
 	if !countsFresh(t, sv) {
 		t.Fatal("benign or foreign watch errors made the view stale")
 	}
-	if workspaceTypeDescription != "*v1.Workspace" {
-		t.Fatalf("workspaceTypeDescription = %q, want the reflector's *v1.Workspace", workspaceTypeDescription)
-	}
-}
-
-// TestWatchDelivered_ResyncIsNoHeartbeat: a periodic resync replays the
-// store with an unchanged resource version and keeps firing while the
-// watch is down, so only a new version counts as a heartbeat.
-func TestWatchDelivered_ResyncIsNoHeartbeat(t *testing.T) {
-	a := &cdiv1.Workspace{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "41"}}
-	b := &cdiv1.Workspace{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "42"}}
-	if watchDelivered(a, a.DeepCopy()) {
-		t.Fatal("resync replay counted as a heartbeat")
-	}
-	if !watchDelivered(a, b) {
-		t.Fatal("new object version not counted as a heartbeat")
-	}
-}
-
-// TestWorkspaceListProbe: the probe lists per managed namespace (or
-// cluster-wide) and surfaces a failing API read.
-func TestWorkspaceListProbe(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := cdiv1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	ok := fake.NewClientBuilder().WithScheme(scheme).Build()
-	ctx := context.Background()
-	if err := WorkspaceListProbe(ok, nil)(ctx); err != nil {
-		t.Fatalf("cluster-wide probe: %v", err)
-	}
-	if err := WorkspaceListProbe(ok, []string{"ns-a", "ns-b"})(ctx); err != nil {
-		t.Fatalf("namespaced probe: %v", err)
-	}
-	broken := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
-	if err := WorkspaceListProbe(broken, []string{"ns-a"})(ctx); err == nil {
-		t.Fatal("probe hid a failing list")
+	if td != "*v1.Workspace" {
+		t.Fatalf("WorkspaceTypeDescription = %q, want the reflector's *v1.Workspace", td)
 	}
 }
