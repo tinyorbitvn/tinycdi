@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Alert, Button, Card, Input, Section, Select, Spinner, Table, useTableSort } from "../design";
+import { Alert, Button, Card, Form, FormActions, Input, Section, Select, Spinner, Table, useTableSort } from "../design";
 import type { Column } from "../design/Table";
 import { IconRefresh } from "../design/icons";
 import { t, type MessageKey } from "../i18n";
@@ -228,7 +228,13 @@ export function SessionPolicyContent({
         description={t("admin.policy.ceiling.description")}
       >
         <SourceNote source={policy.source} />
-        <div className="tc-admin-policy-fields">
+        <Form
+          columns={2}
+          onSubmit={(e) => {
+            e.preventDefault();
+            void save();
+          }}
+        >
           <Select
             label={t("admin.policy.clipboard.label")}
             hint={t("admin.policy.clipboard.hint")}
@@ -255,21 +261,16 @@ export function SessionPolicyContent({
             value={ftMax}
             onChange={(e) => setFtMax(e.target.value)}
           />
-        </div>
-        <Alert tone="info">{t("admin.policy.appliesNote")}</Alert>
-        <div>
-          <Button
-            variant="primary"
-            loading={busy}
-            disabled={!dirty || ftInvalid}
-            onClick={() => void save()}
-          >
-            {t("admin.policy.save")}
-          </Button>{" "}
-          {policy.source === "TenantRow" && !dirty ? (
-            <Button onClick={() => setApplyOpen(true)}>{t("admin.policy.apply.button")}</Button>
-          ) : null}
-        </div>
+          <Alert tone="info">{t("admin.policy.appliesNote")}</Alert>
+          <FormActions>
+            <Button type="submit" variant="primary" loading={busy} disabled={!dirty || ftInvalid}>
+              {t("admin.policy.save")}
+            </Button>
+            {policy.source === "TenantRow" && !dirty ? (
+              <Button onClick={() => setApplyOpen(true)}>{t("admin.policy.apply.button")}</Button>
+            ) : null}
+          </FormActions>
+        </Form>
         <ApiErrorAlert error={saveError} />
       </Section>
       <Section

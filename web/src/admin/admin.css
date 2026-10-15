@@ -47,25 +47,19 @@
   margin-top: var(--tc-space-1);
 }
 
-.tc-admin-policy-fields {
-  display: grid;
-  gap: var(--tc-space-4);
-  grid-template-columns: repeat(auto-fit, minmax(16rem, 24rem));
-  margin-block: var(--tc-space-4);
-}
-
-.tc-admin-filters {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: var(--tc-space-3);
-  margin-block-end: var(--tc-space-4);
-}
-
 .tc-quota-source {
   margin-block-end: var(--tc-space-4);
 }
 
 .tc-userlimits-default {
   margin-block-end: var(--tc-space-4);
+}
+
+.tc-audit-filters {
+  margin-block-end: var(--tc-space-6);
+}
+
+/* The users filter is a search box, not a full-width form row. */
+.tc-admin-filter {
+  max-width: 24rem;
 }

@@ -76,4 +76,18 @@ describe("AuditPage", () => {
       ).toBe(true),
     );
   });
+  it("filters sit in a two-column Form with Apply/Clear in FormActions and a local-time hint", async () => {
+    setup();
+    const apply = await screen.findByRole("button", { name: "Apply" });
+    expect(apply.closest("form")).toHaveClass("tc-form", "tc-form--2col");
+    expect(apply.parentElement).toHaveClass("tc-form__actions");
+    expect(screen.getByRole("button", { name: "Clear" }).parentElement).toBe(apply.parentElement);
+    expect(screen.getAllByText("Local time")).toHaveLength(2);
+  });
+
+  it("denied outcomes use the danger tone", async () => {
+    setup();
+    const denied = (await screen.findAllByText("Denied"))[0]!;
+    expect(denied.closest(".tc-badge")).toHaveClass("tc-badge--danger");
+  });
 });

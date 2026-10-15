@@ -178,6 +178,11 @@ describe("UsersAdminPage", () => {
       userDetailPath("https://idp.invalid|user-01J4ZDMGH"),
     );
   });
+  it("caps the filter field width", async () => {
+    renderWithApi(<UsersAdminPage />, setup());
+    const search = await screen.findByRole("searchbox");
+    expect(search.closest(".tc-admin-filter")).not.toBeNull();
+  });
 });
 
 function userLimitPuts(api: ReturnType<typeof createMockApi>) {
@@ -276,5 +281,17 @@ describe("UserDetailPage", () => {
     expect(JSON.parse(put.rawBody)).toEqual({ limit: 1 });
     // No override row existed: the write creates it with If-Match: *.
     expect(put.headers["if-match"]).toBe("*");
+  });
+  it("puts identity facts under an Identity section, not the limit heading or the subtitle", async () => {
+    renderWithApi(<UserDetailPage ownerRef={GRACE_REF} />, setup());
+    await screen.findByRole("heading", { name: "Grace Hopper" });
+    const identity = screen.getByRole("region", { name: "Identity" });
+    expect(within(identity).getByText("Issuer", { selector: "dt" })).toBeInTheDocument();
+    expect(within(identity).getByText("https://idp.invalid", { selector: "code" })).toBeInTheDocument();
+    expect(within(identity).getByText("Last seen", { selector: "dt" })).toBeInTheDocument();
+    const limit = screen.getByRole("region", { name: "Running-workspace limit" });
+    expect(within(limit).queryByText("Subject", { selector: "dt" })).toBeNull();
+    expect(document.querySelector(".tc-page__description")).toBeNull();
+    expect(screen.getByRole("link", { name: "Back to users" })).toHaveClass("tc-backlink");
   });
 });
