@@ -435,8 +435,9 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 		}
 	})
 	b.bg = append(b.bg, func(ctx context.Context) {
+		// The freshness tracker synced itself on the Workspace handler's
+		// initial list (SyncedWhen); this only gates readiness.
 		if kcache.WaitForCacheSync(ctx) {
-			watch.MarkSynced(time.Now())
 			b.markCacheSynced()
 		}
 	})

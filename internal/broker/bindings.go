@@ -36,10 +36,11 @@ type K8sBindingSource struct {
 }
 
 // NewK8sBindingSource builds the source over the cache's Workspace informer.
-// With a shared tracker the caller feeds it (Tracker.Handler on the
-// informer with SyncedWhen on its registration, the cache's watch error handler, MarkSynced, Run); with nil the
-// source owns a tracker and registers its event handler itself, and the
-// caller calls MarkSynced and NoteWatchError and runs the tracker's probe.
+// Production passes the backend's shared tracker, which the caller feeds:
+// Tracker.Handler on the informer with SyncedWhen on its registration, the
+// cache's watch error handler, and one Tracker.Run. nil is for tests only:
+// the source then owns a private tracker and registers its event handler
+// itself, and nothing probes it unless the test does.
 func NewK8sBindingSource(ctx context.Context, c crcache.Cache, health *watchhealth.Tracker) (*K8sBindingSource, error) {
 	inf, err := c.GetInformer(ctx, &cdiv1.Workspace{})
 	if err != nil {

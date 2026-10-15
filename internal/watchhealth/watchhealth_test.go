@@ -197,8 +197,7 @@ func TestProbe_ManyNamespacesBehindALimiter(t *testing.T) {
 }
 
 // TestProbe_SlowListWithinBudget: a list slower than the probe interval but
-// inside maxStale − interval still proves freshness; one that overruns it
-// does not.
+// inside ProbeTimeout still proves freshness; one that overruns it does not.
 func TestProbe_SlowListWithinBudget(t *testing.T) {
 	const every, maxStale = 50 * time.Millisecond, 250 * time.Millisecond // scaled 5 s / 15 s
 	probe := func(delay time.Duration) bool {
@@ -210,7 +209,7 @@ func TestProbe_SlowListWithinBudget(t *testing.T) {
 		_, last := tr.Health(time.Now(), time.Hour)
 		return last.After(synced)
 	}
-	if !probe(120 * time.Millisecond) { // > interval, < maxStale − interval
+	if !probe(90 * time.Millisecond) { // > interval, < ProbeTimeout (125 ms)
 		t.Fatal("a list slower than the interval but inside the budget failed the probe")
 	}
 	if probe(300 * time.Millisecond) {
@@ -315,5 +314,55 @@ func TestSyncedWhen_HandlerRegistration(t *testing.T) {
 	}
 	if fresh, _ := tr.Health(now.Add(16*time.Second), 15*time.Second); fresh {
 		t.Fatal("the sync stamp never ages: still fresh past the bound without a probe")
+	}
+}
+
+// TestRun_SteadyStateSlowListNeverFlaps runs the real probe loop (scaled:
+// interval 100 ms, bound 300 ms, so ProbeTimeout 150 ms) against a list
+// that always succeeds but slowly, and samples Health throughout. A list
+// under the timeout is fresh at every sample. A list over it — which the
+// old maxStale − interval timeout (200 ms) accepted, letting the heartbeat
+// age to 2d > maxStale between probes — now fails every probe: stale once
+// the sync stamp ages out, at every later sample, never flapping back.
+func TestRun_SteadyStateSlowListNeverFlaps(t *testing.T) {
+	const every, maxStale = 100 * time.Millisecond, 300 * time.Millisecond
+	if got := ProbeTimeout(every, maxStale); got != 150*time.Millisecond {
+		t.Fatalf("ProbeTimeout = %v, want maxStale/2 = 150ms", got)
+	}
+	if got := ProbeTimeout(5*time.Second, 15*time.Second); got != 7500*time.Millisecond {
+		t.Fatalf("production ProbeTimeout = %v, want 7.5s", got)
+	}
+	sample := func(delay time.Duration) (fresh, stale int) {
+		r := &metaReader{byNS: map[string][]string{"ns-a": nil}, delay: delay}
+		var tr Tracker
+		tr.MarkSynced(time.Now())
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			tr.Run(ctx, time.Now, WorkspaceMetadataVersions(r, []string{"ns-a"}), emptyCache{}, every, maxStale)
+		}()
+		deadline := time.Now().Add(1500 * time.Millisecond)
+		settle := time.Now().Add(maxStale + 50*time.Millisecond) // past the sync stamp
+		for time.Now().Before(deadline) {
+			ok, _ := tr.Health(time.Now(), maxStale)
+			switch {
+			case time.Now().Before(settle):
+			case ok:
+				fresh++
+			default:
+				stale++
+			}
+			time.Sleep(3 * time.Millisecond)
+		}
+		cancel()
+		<-done
+		return fresh, stale
+	}
+	if fresh, stale := sample(110 * time.Millisecond); stale != 0 || fresh == 0 {
+		t.Fatalf("list under the timeout: %d stale of %d samples, want none", stale, fresh+stale)
+	}
+	if fresh, stale := sample(180 * time.Millisecond); fresh != 0 || stale == 0 {
+		t.Fatalf("list over the timeout: %d fresh of %d samples after the sync stamp aged out, want none (no flapping)", fresh, fresh+stale)
 	}
 }

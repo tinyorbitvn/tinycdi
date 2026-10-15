@@ -27,8 +27,9 @@
 // measured tick to tick and list latency cannot postpone it. With a 5 s
 // probe and a 15 s bound, a change the watch never delivers is stale once
 // the next probe still sees it: within 10 s of the change plus one list
-// latency, inside the 15 s bound. A probe may take up to bound − interval
-// (10 s) before it counts as failed.
+// latency, inside the 15 s bound. A probe may take up to ProbeTimeout
+// (7.5 s: half the bound, so steady-state freshness never flaps) before it
+// counts as failed.
 //
 // Cost per probe: one paged metadata-only list per watched namespace
 // (cluster-wide when none), at most ProbeParallelism in flight, returning
@@ -243,18 +244,22 @@ func (t *Tracker) Probe(ctx context.Context, now func() time.Time, api Versions,
 	}
 }
 
-// ProbeTimeout is how long one probe's lists may take: maxStale − every (at
-// least every), so a slow list still proves freshness inside the bound.
+// ProbeTimeout is how long one probe's lists may take:
+// min(maxStale − every, maxStale/2), at least every. The heartbeat is the
+// start of the last good probe and lands when it ends, and the next probe
+// starts no earlier than the previous one ended (the ticker holds one
+// tick), so in steady state the heartbeat's age peaks at max(every, d) + d
+// for a list taking d. Capping d at maxStale/2 keeps that peak within
+// maxStale: a slow list either proves freshness on every cycle or fails
+// outright — it never flaps between fresh and stale.
 func ProbeTimeout(every, maxStale time.Duration) time.Duration {
-	if d := maxStale - every; d > every {
-		return d
-	}
-	return every
+	d := min(maxStale-every, maxStale/2)
+	return max(d, every)
 }
 
 // Run calls Probe every interval until ctx ends, with grace one interval
-// and a timeout of maxStale − interval: a slow list still proves freshness
-// as long as it finishes inside the bound.
+// and ProbeTimeout: a slow list still proves freshness as long as it
+// finishes inside the timeout.
 func (t *Tracker) Run(ctx context.Context, now func() time.Time, api Versions, cache client.Reader, every, maxStale time.Duration) {
 	timeout := ProbeTimeout(every, maxStale)
 	tk := time.NewTicker(every)
