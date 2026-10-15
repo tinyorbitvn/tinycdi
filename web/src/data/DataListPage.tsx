@@ -16,7 +16,7 @@ import {
 } from "../design";
 import { Link, navigate } from "../lib/router";
 import { useApi } from "../api/context";
-import { isPortalApiError } from "../api/errors";
+import { ErrorBanner } from "../workspaces/ErrorBanner";
 import { t, formatDateTime, type MessageKey } from "../i18n";
 import { runtimeLabel } from "../templates/format";
 import { AttachDialog } from "./AttachDialog";
@@ -212,15 +212,7 @@ export function DataListPage({ pollIntervalMs }: { pollIntervalMs?: number }) {
           {notice}
         </Alert>
       ) : null}
-      {list.error ? (
-        <Alert
-          tone="danger"
-          title={isPortalApiError(list.error) ? list.error.code : undefined}
-          actions={<Button onClick={list.refresh}>{t("data.error.retry")}</Button>}
-        >
-          {list.error instanceof Error ? list.error.message : String(list.error)}
-        </Alert>
-      ) : null}
+      <ErrorBanner error={list.error} onRetry={list.refresh} />
       <Table
         caption={t("data.list.caption")}
         columns={columns}

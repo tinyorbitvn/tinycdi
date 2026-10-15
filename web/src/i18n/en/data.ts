@@ -28,7 +28,6 @@ export default {
   "data.action.attach": "Attach",
   "data.action.purge": "Purge",
   "data.action.cancel": "Cancel",
-  "data.error.retry": "Retry",
   "data.detail.title": "Retained disk {id}",
   "data.detail.back": "Back to retained data",
   "data.detail.copyId": "Copy ID",
@@ -61,7 +60,7 @@ export default {
   "data.attach.conflict": "This disk is already being attached. Refresh and try again.",
   "data.purge.title": "Purge {id}?",
   "data.purge.description":
-    "Purging {id} ({size} GiB from {source}) destroys the disk permanently. This cannot be undone.",
+    "{size} GiB from {source}. Purging destroys the disk permanently. This cannot be undone.",
   "data.purge.confirmLabel": "Confirmation",
   "data.purge.confirmHint": "Type {id} to confirm.",
   "data.purge.submit": "Purge permanently",

@@ -61,7 +61,7 @@ export function DeleteWorkspaceButton({
         onConfirm={() => void doDelete()}
         onCancel={() => setConfirming(false)}
       >
-        <p>{t("workspaces.delete.confirm", { name: workspace.name })}</p>
+        <p>{t("workspaces.delete.confirm")}</p>
         <p>
           {workspace.dataPolicy === "Retain"
             ? t("workspaces.delete.dataRetain")

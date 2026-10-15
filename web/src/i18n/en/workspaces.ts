@@ -159,7 +159,7 @@ export default {
   "workspaces.delete.action": "Delete",
   "workspaces.delete.title": "Delete {name}?",
   "workspaces.delete.confirm":
-    "Delete {name}? Access is revoked and the runtime is removed.",
+    "Access is revoked and the runtime is removed.",
   "workspaces.delete.dataRetain":
     "Its disk moves to the retained inventory — it is not destroyed here (use Purge on the Retained data page for that).",
   "workspaces.delete.dataEphemeral":

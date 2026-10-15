@@ -29,7 +29,6 @@ export default {
   "data.action.attach": "Gắn",
   "data.action.purge": "Xoá vĩnh viễn",
   "data.action.cancel": "Huỷ",
-  "data.error.retry": "Thử lại",
   "data.detail.title": "Đĩa giữ lại {id}",
   "data.detail.back": "Về dữ liệu giữ lại",
   "data.detail.copyId": "Sao chép ID",
@@ -62,7 +61,7 @@ export default {
   "data.attach.conflict": "Đĩa này đang được gắn. Làm mới rồi thử lại.",
   "data.purge.title": "Xoá vĩnh viễn {id}?",
   "data.purge.description":
-    "Xoá vĩnh viễn {id} ({size} GiB từ {source}) sẽ huỷ đĩa hoàn toàn. Không thể hoàn tác.",
+    "{size} GiB từ {source}. Xoá vĩnh viễn sẽ huỷ đĩa hoàn toàn. Không thể hoàn tác.",
   "data.purge.confirmLabel": "Xác nhận",
   "data.purge.confirmHint": "Gõ {id} để xác nhận.",
   "data.purge.submit": "Xoá vĩnh viễn",

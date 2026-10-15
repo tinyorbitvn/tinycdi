@@ -82,4 +82,14 @@ describe("data purge", () => {
     expect(api.state.retained.get(RETAINED_DISK.id)?.state).toBe("Attaching");
     expect(dialog).toBeInTheDocument();
   });
+
+  it("the purge dialog body does not repeat the id from its title", async () => {
+    const api = createMockApi();
+    loginCookies();
+    renderWithApi(<DataListPage />, api);
+    const dialog = await openPurge();
+    expect(
+      within(dialog).getByText("20 GiB from old-desktop. Purging destroys the disk permanently. This cannot be undone."),
+    ).toBeInTheDocument();
+  });
 });

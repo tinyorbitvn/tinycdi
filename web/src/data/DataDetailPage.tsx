@@ -13,7 +13,7 @@ import {
 import { Link, navigate } from "../lib/router";
 import { shortId } from "./format";
 import { useApi } from "../api/context";
-import { isPortalApiError } from "../api/errors";
+import { ErrorBanner } from "../workspaces/ErrorBanner";
 import { useResource } from "../workspaces/resource";
 import { t, formatDateTime } from "../i18n";
 import { runtimeLabel } from "../templates/format";
@@ -92,13 +92,7 @@ export function DataDetailPage({
         back={{ to: "/data", label: t("data.detail.back") }}
       >
         {detail.error && !(detail.data === null) ? (
-          <Alert
-            tone="danger"
-            title={isPortalApiError(detail.error) ? detail.error.code : undefined}
-            actions={<Button onClick={() => void detail.refresh()}>{t("data.error.retry")}</Button>}
-          >
-            {detail.error instanceof Error ? detail.error.message : String(detail.error)}
-          </Alert>
+          <ErrorBanner error={detail.error} onRetry={() => void detail.refresh()} />
         ) : (
           <EmptyState
             title={t("data.detail.notFound.title")}

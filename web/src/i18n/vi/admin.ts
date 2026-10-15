@@ -367,7 +367,6 @@ export default {
   // Error guidance (stable code -> next step; server messages are detail).
   "admin.errors.title": "Lỗi",
   "admin.errors.retry": "Thử lại",
-  "admin.errors.requestId": "Mã yêu cầu: {id}",
   "admin.errors.forbidden":
     "Bạn không có quyền thực hiện việc này. Các chế độ xem toàn tenant cần vai trò quản trị viên tenant.",
   "admin.errors.notFound": "Nó không còn tồn tại hoặc bạn không thấy nó. Làm mới danh sách.",

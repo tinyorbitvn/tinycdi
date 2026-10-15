@@ -367,7 +367,6 @@ export default {
   // Error guidance (stable code -> next step; server messages are detail).
   "admin.errors.title": "Error",
   "admin.errors.retry": "Retry",
-  "admin.errors.requestId": "Request ID: {id}",
   "admin.errors.forbidden":
     "You do not have permission for this. Tenant-wide views need the tenant-admin role.",
   "admin.errors.notFound": "It no longer exists or is not visible to you. Refresh the list.",

@@ -450,6 +450,13 @@
   color: var(--tc-color-text-muted);
 }
 
+.tc-alert__meta {
+  margin-top: var(--tc-space-1);
+  color: var(--tc-color-text-muted);
+  font-family: var(--tc-font-mono);
+  font-size: var(--tc-text-xs);
+}
+
 .tc-alert__title + .tc-alert__body {
   margin-top: var(--tc-space-1);
 }

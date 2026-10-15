@@ -162,7 +162,7 @@ export default {
   "workspaces.delete.action": "Xoá",
   "workspaces.delete.title": "Xoá {name}?",
   "workspaces.delete.confirm":
-    "Xoá {name}? Quyền truy cập bị thu hồi và runtime bị gỡ.",
+    "Quyền truy cập bị thu hồi và runtime bị gỡ.",
   "workspaces.delete.dataRetain":
     "Đĩa của nó chuyển sang kho dữ liệu giữ lại — không bị huỷ ở đây (dùng Xoá vĩnh viễn trên trang Dữ liệu giữ lại để huỷ).",
   "workspaces.delete.dataEphemeral":

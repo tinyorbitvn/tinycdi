@@ -1,4 +1,5 @@
 import { Alert, Button } from "../design";
+import { ErrorMeta } from "../api/ErrorMeta";
 import { t, type MessageKey } from "../i18n";
 import {
   isPortalApiError,
@@ -74,30 +75,24 @@ export function ErrorBanner({
   if (!error) return null;
   const apiErr = isPortalApiError(error) ? error : null;
   const detail = error instanceof Error ? error.message : String(error);
+  const canRetry = onRetry && (!apiErr || apiErr.retryable);
   return (
     <Alert
       tone="danger"
-      title={apiErr ? apiErr.code : t("errors.banner.fallback")}
-      actions={
-        <>
-          {onRetry && (!apiErr || apiErr.retryable) ? (
-            <Button size="sm" variant="secondary" onClick={onRetry}>
-              {t("errors.banner.retry")}
-            </Button>
-          ) : null}
-          {onDismiss ? (
-            <Button size="sm" variant="secondary" onClick={onDismiss}>
-              {t("errors.banner.dismiss")}
-            </Button>
-          ) : null}
-        </>
-      }
+      title={apiErr ? guidance(apiErr) : t("errors.banner.fallback")}
+      {...(onDismiss ? { onDismiss } : {})}
+      {...(canRetry
+        ? {
+            actions: (
+              <Button size="sm" variant="secondary" onClick={onRetry}>
+                {t("errors.banner.retry")}
+              </Button>
+            ),
+          }
+        : {})}
     >
-      {apiErr ? guidance(apiErr) : detail}
-      {apiErr?.message ? ` ${apiErr.message}` : null}
-      {apiErr?.requestId
-        ? ` ${t("errors.banner.requestId", { id: apiErr.requestId })}`
-        : null}
+      {apiErr ? (apiErr.message ? <p>{apiErr.message}</p> : null) : <p>{detail}</p>}
+      <ErrorMeta error={error} />
     </Alert>
   );
 }

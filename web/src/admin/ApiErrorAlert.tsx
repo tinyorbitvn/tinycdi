@@ -1,4 +1,5 @@
 import { Alert, Button } from "../design";
+import { ErrorMeta } from "../api/ErrorMeta";
 import { isPortalApiError, type ErrorCode, type PortalApiError } from "../api/errors";
 import { t, type MessageKey } from "../i18n";
 
@@ -39,12 +40,13 @@ export function ApiErrorAlert({
 }) {
   if (!error) return null;
   const apiErr = isPortalApiError(error) ? error : null;
-  const text = apiErr ? errorGuidance(apiErr) : error instanceof Error ? error.message : String(error);
+  const guidanceText = apiErr ? errorGuidance(apiErr) : null;
+  const message = apiErr ? apiErr.message : error instanceof Error ? error.message : String(error);
   const canRetry = onRetry && (!apiErr || apiErr.retryable);
   return (
     <Alert
       tone="danger"
-      title={title ?? (apiErr ? apiErr.code : t("admin.errors.title"))}
+      title={title ?? guidanceText ?? t("admin.errors.title")}
       {...(onDismiss ? { onDismiss } : {})}
       {...(canRetry
         ? {
@@ -56,8 +58,9 @@ export function ApiErrorAlert({
           }
         : {})}
     >
-      <p>{text}</p>
-      {apiErr?.requestId ? <p className="tc-admin-muted">{t("admin.errors.requestId", { id: apiErr.requestId })}</p> : null}
+      {title && guidanceText ? <p>{guidanceText}</p> : null}
+      {message ? <p>{message}</p> : null}
+      <ErrorMeta error={error} />
     </Alert>
   );
 }
