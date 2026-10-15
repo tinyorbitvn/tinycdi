@@ -326,20 +326,26 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	})
 
 	// Binding source: an informer cache over Workspace CRs, scoped to the
-	// managed tenant namespaces. Its resync period doubles as the liveness
-	// heartbeat — must stay well under broker.MaxBindingAge (15 s) so a
-	// stalled watch stops issuance (fail closed).
+	// managed tenant namespaces. Resync replays are not a heartbeat (they
+	// keep firing while the watch is down): the binding source judges watch
+	// health from delivered events, an uncached liveness probe on the same
+	// period and the cache's list/watch failures, so a stalled watch stops
+	// issuance within broker.MaxBindingAge (15 s, fail closed).
 	bindingResync := 5 * time.Second
-	// The status view reads its watch health from the cache's list/watch
-	// failures; it is created after the cache, so the handler reaches it
-	// through a pointer set before the cache starts.
+	// The status view and the binding source read watch health from the
+	// cache's list/watch failures; both are created after the cache, so the
+	// one handler reaches them through pointers set before the cache starts.
 	var statusViewRef atomic.Pointer[api.K8sStatusView]
+	var bindingsRef atomic.Pointer[broker.K8sBindingSource]
 	cacheOpts := crcache.Options{
 		Scheme: scheme, SyncPeriod: &bindingResync,
 		DefaultWatchErrorHandler: func(ctx context.Context, r *toolscache.Reflector, err error) {
 			toolscache.DefaultWatchErrorHandler(ctx, r, err)
 			if sv := statusViewRef.Load(); sv != nil {
 				sv.NoteWatchError(r.TypeDescription(), err)
+			}
+			if bs := bindingsRef.Load(); bs != nil {
+				bs.NoteWatchError(r.TypeDescription(), err)
 			}
 		},
 	}
@@ -357,6 +363,14 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	if err != nil {
 		return fmt.Errorf("binding source: %w", err)
 	}
+	bindingsRef.Store(bindings)
+	// Liveness heartbeat for an idle watch: while no Workspace changes, an
+	// uncached one-item list proves the API server still serves the
+	// resource, so a quiet tenant keeps connecting and an unreachable API
+	// server stops it.
+	b.bg = append(b.bg, func(ctx context.Context) {
+		bindings.RunLiveness(ctx, broker.WorkspaceListProbe(kc, slices.Sorted(maps.Keys(cacheOpts.DefaultNamespaces))), bindingResync)
+	})
 	// Event-driven quota settle: the operator writes its observed runtime
 	// absence into Workspace CR status (or the CR's deletion); every event
 	// enqueues the platform id, and the leader-gated worker re-checks the

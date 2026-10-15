@@ -79,9 +79,9 @@ func TestK8sBindingSource_Projection(t *testing.T) {
 		t.Fatalf("unsynced binding = %v, want ErrFreshness", err)
 	}
 
-	// Live informer cache restricted to the managed namespace. The resync
-	// doubles as the liveness heartbeat (minimum allowed is 1 s, well under
-	// the 15 s freshness budget).
+	// Live informer cache restricted to the managed namespace. Resync
+	// replays are not a heartbeat; the Workspace create/update events below
+	// keep the source fresh for the test's few seconds.
 	resync := time.Second
 	kcache, err := crcache.New(restCfg, crcache.Options{
 		Scheme:     scheme,
