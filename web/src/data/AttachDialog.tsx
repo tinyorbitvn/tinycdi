@@ -136,7 +136,9 @@ export function AttachDialog({
               ? t("errors.code.quotaReleasePending")
               : isPortalApiError(error) && error.code === "INVALID_STATE"
                 ? t("data.attach.conflict")
-                : error instanceof Error
+                : isPortalApiError(error) && error.code === "ALREADY_EXISTS"
+                  ? t("errors.code.alreadyExists")
+                  : error instanceof Error
                   ? error.message
                   : String(error)}
           </Alert>

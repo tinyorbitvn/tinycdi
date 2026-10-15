@@ -52,7 +52,7 @@ func (a *Authenticator) SessionProbeHandler(w http.ResponseWriter, r *http.Reque
 		_, err := a.lookupSession(r, c.Value, false)
 		authenticated = err == nil
 	}
-	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Cache-Control", APICacheControl)
 	respondJSON(w, sessionProbeView{Authenticated: authenticated})
 }
 

@@ -294,6 +294,8 @@ export default {
   "admin.sessions.confirm.body":
     "Mọi phiên portal của người dùng này sẽ kết thúc và các desktop đang mở sẽ ngắt kết nối. Workspace vẫn tiếp tục chạy.",
   "admin.sessions.done": "Đã đăng xuất: {sessions} phiên portal, {leases} phiên desktop.",
+  "admin.sessions.selfSignedOut":
+    "Phiên portal của chính bạn cũng đã bị đăng xuất. Đang chuyển tới trang đăng xuất…",
 
   // Session policy page (giới hạn clipboard của tenant, ADR 0009).
   "admin.policy.title": "Chính sách phiên",
@@ -308,7 +310,7 @@ export default {
     "Chưa đặt giới hạn — chính sách riêng của từng template được áp dụng nguyên bản.",
   "admin.policy.clipboard.label": "Clipboard",
   "admin.policy.clipboard.hint":
-    "Send cho phép sao chép từ thiết bị vào workspace; Receive cho phép sao chép từ workspace về thiết bị.",
+    "Chỉ gửi cho phép sao chép từ thiết bị vào workspace; Chỉ nhận cho phép sao chép từ workspace về thiết bị.",
   "admin.policy.fileTransfer.label": "Truyền tệp",
   "admin.policy.fileTransfer.hint":
     "Tải lên là thiết bị → workspace, Tải xuống là workspace → thiết bị. Tệp nằm trong thư mục Transfers của thư mục chính workspace.",

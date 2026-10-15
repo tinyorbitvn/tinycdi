@@ -91,8 +91,8 @@ func TestSessionProbe_HeadersAndNoCookie(t *testing.T) {
 	for name, cookie := range map[string]*http.Cookie{"anonymous": nil, "signed-in": sess} {
 		t.Run(name, func(t *testing.T) {
 			r, _ := probeSession(t, env, cookie)
-			if cc := r.Header.Get("Cache-Control"); cc != "no-store" {
-				t.Fatalf("Cache-Control = %q, want no-store", cc)
+			if cc := r.Header.Get("Cache-Control"); cc != "no-store, no-transform" {
+				t.Fatalf("Cache-Control = %q, want no-store, no-transform", cc)
 			}
 			if ct := r.Header.Get("Content-Type"); ct != "application/json" {
 				t.Fatalf("Content-Type = %q, want application/json", ct)

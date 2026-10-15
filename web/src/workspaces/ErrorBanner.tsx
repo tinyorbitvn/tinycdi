@@ -21,6 +21,7 @@ const GUIDANCE_KEYS: Record<ErrorCode, MessageKey> = {
   INVALID_STATE: "errors.code.invalidState",
   CONNECTION_IN_USE: "errors.code.connectionInUse",
   IMAGE_STALE: "errors.code.imageStale",
+  ALREADY_EXISTS: "errors.code.alreadyExists",
   FORBIDDEN: "errors.code.forbidden",
   NOT_FOUND: "errors.code.notFound",
   CSRF_FAILED: "errors.code.csrfFailed",

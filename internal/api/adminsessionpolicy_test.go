@@ -429,3 +429,29 @@ func TestAdminSessionPolicy_FileTransferWrites(t *testing.T) {
 		}
 	}
 }
+
+// TestSessionPolicy_WeakIfMatchBehindProxy: a CDN that
+// compresses the GET weakens the ETag to W/"…", and the portal echoes that
+// value. The ceiling PUT must accept the weakened echo of the current tag
+// and still refuse a weakened stale one.
+func TestSessionPolicy_WeakIfMatchBehindProxy(t *testing.T) {
+	src := &fakeSessionPolicySource{hasRow: true, version: 3, clip: "Send"}
+	env := newSessionPolicyEnv(t, src)
+	sess, csrf := loginAdmin(t, env, "admin-a")
+	g := doReq(t, env, sess, csrf, http.MethodGet, adminSessionPolicyPath, "", nil)
+	g.Body.Close()
+	tag := g.Header.Get("ETag")
+	if tag == "" {
+		t.Fatal("GET carried no ETag")
+	}
+	put := func(ifMatch string) *http.Response {
+		return doReq(t, env, sess, csrf, http.MethodPut, adminSessionPolicyPath,
+			`{"clipboard":"Disabled"}`, map[string]string{"If-Match": ifMatch})
+	}
+	requireErr(t, put("W/"+ETagOf("v0")), http.StatusPreconditionFailed, CodePreconditionFailed, "weak stale tag")
+	r := put("W/" + tag)
+	r.Body.Close()
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("weak echo of the current tag: status=%d, want 200", r.StatusCode)
+	}
+}

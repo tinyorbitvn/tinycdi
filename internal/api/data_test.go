@@ -524,6 +524,23 @@ func TestAttachRetained_NotRetained(t *testing.T) {
 	}
 }
 
+// TestAttachRetained_NameTaken: attaching under a name the caller already
+// uses is 409 ALREADY_EXISTS, the same as a create.
+func TestAttachRetained_NameTaken(t *testing.T) {
+	fs := newFakeRetainedStore()
+	fs.quotaErr = provisioning.ErrNameTaken
+	env := newDataEnv(t, fs)
+	rec := seedRetained(fs, "rd_attach0009", "tenant-a", envOwner(env, "user-a"), "LinuxContainer")
+	sess, csrf := login(t, env, "user-a")
+
+	r := doDataReq(t, env, sess, csrf, http.MethodPost, "/v1/data/"+rec.ID+":attach",
+		`{"name":"home","templateRef":"tpl_linuxdesktop"}`,
+		map[string]string{"Idempotency-Key": "key-attach-0009"})
+	if e := errBody(t, r); r.StatusCode != http.StatusConflict || e.Code != "ALREADY_EXISTS" || e.Retryable {
+		t.Fatalf("attach under a taken name: status=%d err=%+v, want 409 ALREADY_EXISTS", r.StatusCode, e)
+	}
+}
+
 // TestAttachRetained_RuntimeMismatch: a template whose runtime differs from
 // the disk's runtime is 422 INVALID_TEMPLATE.
 func TestAttachRetained_RuntimeMismatch(t *testing.T) {

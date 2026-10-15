@@ -28,6 +28,9 @@ export function CreateWorkspacePage() {
   const [startNow, setStartNow] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  // The name the server refused as taken (409 ALREADY_EXISTS); flagged on
+  // the name field until the user edits it.
+  const [takenName, setTakenName] = useState<string | null>(null);
   // One Idempotency-Key per create attempt; a retry of the SAME attempt reuses
   // it so the server replays the recorded result instead of double-creating.
   const idemKey = useRef<string | null>(null);
@@ -56,6 +59,14 @@ export function CreateWorkspacePage() {
       idemKey.current = null;
       navigate(`/workspaces/${ws.id}`);
     } catch (err) {
+      if (isPortalApiError(err) && err.code === "ALREADY_EXISTS") {
+        // Shown on the name field, not as a banner. The attempt is over:
+        // a new name is a different body, so the next submit needs a
+        // fresh key.
+        setTakenName(name.trim());
+        idemKey.current = null;
+        return;
+      }
       setError(err);
       // Key reused with a different body: this attempt is over — the next
       // submit mints a fresh key.
@@ -102,6 +113,7 @@ export function CreateWorkspacePage() {
             pattern={NAME_PATTERN}
             value={name}
             onChange={(e) => setName(e.target.value)}
+            error={takenName !== null && name.trim() === takenName ? t("errors.code.alreadyExists") : undefined}
             placeholder={t("workspaces.create.namePlaceholder")}
             autoComplete="off"
           />

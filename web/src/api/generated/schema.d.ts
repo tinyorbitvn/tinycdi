@@ -45,7 +45,7 @@ export interface paths {
          *     browser console. The probe is passive — it never slides the idle
          *     timer, sets no cookie and needs no CSRF token — and discloses nothing
          *     but the boolean (no subject, tenant, roles or token). The response is
-         *     `Cache-Control: no-store`.
+         *     `Cache-Control: no-store, no-transform`.
          */
         get: operations["getSessionProbe"];
         put?: never;
@@ -214,6 +214,9 @@ export interface paths {
          *     A template whose runtime image is older than `-image-block-after`
          *     (default 45 d) is refused with `409 IMAGE_STALE` (E3); a template
          *     without a parseable `imageBuiltAt` never blocks.
+         *
+         *     Workspace names are unique per owner among live workspaces: a name
+         *     the caller already uses is `409 ALREADY_EXISTS`.
          *
          *     Idempotent: same `Idempotency-Key` + same body returns the recorded
          *     workspace; same key + different body returns `409 IDEMPOTENCY_CONFLICT`.
@@ -888,8 +891,10 @@ export interface paths {
          *     (request to Ready, from the boot ledger), the Workspaces stuck
          *     deleting, and the phase counts. One aggregate query plus the
          *     operator's status counts; the answer is cached for 15 seconds per
-         *     tenant. `fresh: false` means the Kubernetes watch is stale and the
-         *     Kubernetes-derived counts are empty. Counts only, no identities.
+         *     tenant. `fresh: false` means the Kubernetes watch is unhealthy (not
+         *     synced, API server unreachable, or the watch failing for over
+         *     15 s) and the Kubernetes-derived counts are empty; a tenant without
+         *     recent Workspace changes stays fresh. Counts only, no identities.
          *     Requires the tenant-admin role on the named tenant.
          */
         get: operations["getAdminOverview"];
@@ -1039,6 +1044,7 @@ export interface components {
          *     | `PRECONDITION_REQUIRED` | 428 | false | the mutation requires an `If-Match` header; send the resource's current `ETag` (or `*` when the resource does not exist yet) |
          *     | `PRECONDITION_FAILED` | 412 | false | If-Match named a stale version, or `*` on an existing resource; reload the resource and retry |
          *     | `CONNECTION_IN_USE` | 409 | false | a live interactive lease exists; pass `takeover: true` to replace it |
+         *     | `ALREADY_EXISTS` | 409 | false | the name is already used by another of the caller's live workspaces (create, `:attach`); choose a different name |
          *     | `IMAGE_STALE` | 409 | false | the resolved runtime image is older than `-image-block-after` (default 45 d); the message names the template, and for a pinned workspace says it can start again only after an administrator publishes a fresh image. `details` carries `templateName`, `ageDays`, `limitDays`, `pinned` |
          *     | `RATE_LIMITED` | 429 | true | transient throttle; honor `Retry-After` |
          *     | `UNAVAILABLE` | 503 | true | transient dependency failure (store/broker); retry with backoff |
@@ -1047,7 +1053,7 @@ export interface components {
          *     Clients must treat unknown codes as `INTERNAL` (retryable: true).
          * @enum {string}
          */
-        ErrorCode: "UNAUTHENTICATED" | "CSRF_FAILED" | "FORBIDDEN" | "NOT_FOUND" | "INVALID_REQUEST" | "INVALID_TEMPLATE" | "INVALID_STATE" | "IDEMPOTENCY_CONFLICT" | "QUOTA_EXHAUSTED" | "QUOTA_NOT_CONFIGURED" | "QUOTA_MANAGED_BY_CONFIG" | "QUOTA_ABOVE_CEILING" | "PRECONDITION_REQUIRED" | "PRECONDITION_FAILED" | "CONNECTION_IN_USE" | "IMAGE_STALE" | "RATE_LIMITED" | "UNAVAILABLE" | "INTERNAL";
+        ErrorCode: "UNAUTHENTICATED" | "CSRF_FAILED" | "FORBIDDEN" | "NOT_FOUND" | "INVALID_REQUEST" | "INVALID_TEMPLATE" | "INVALID_STATE" | "IDEMPOTENCY_CONFLICT" | "QUOTA_EXHAUSTED" | "QUOTA_NOT_CONFIGURED" | "QUOTA_MANAGED_BY_CONFIG" | "QUOTA_ABOVE_CEILING" | "PRECONDITION_REQUIRED" | "PRECONDITION_FAILED" | "CONNECTION_IN_USE" | "IMAGE_STALE" | "ALREADY_EXISTS" | "RATE_LIMITED" | "UNAVAILABLE" | "INTERNAL";
         /**
          * @description Uniform error envelope returned for every 4xx/5xx response — the body
          *     is the single key `error` carrying an `ErrorBody`.
@@ -2077,7 +2083,8 @@ export interface components {
         /**
          * @description State or idempotency conflict — `IDEMPOTENCY_CONFLICT` (key reused with
          *     a different body), `INVALID_STATE` (operation not valid in the current
-         *     phase/record state), `CONNECTION_IN_USE` (a live interactive lease
+         *     phase/record state), `ALREADY_EXISTS` (the workspace name is already
+         *     in use by the caller), `CONNECTION_IN_USE` (a live interactive lease
          *     exists and `takeover` was not set), `QUOTA_EXHAUSTED` (tenant/user
          *     quota has no headroom), `QUOTA_NOT_CONFIGURED` (the tenant has no
          *     quota at all, so creates fail closed), or `QUOTA_MANAGED_BY_CONFIG`
@@ -2208,11 +2215,16 @@ export interface components {
          */
         Sort: string;
         /**
-         * @description Strong entity tag of the resource's current version, as returned in
-         *     the `ETag` header or body of the last read/write. Missing → `428
+         * @description Entity tag of the resource's current version, as returned in the
+         *     `ETag` header or body of the last read/write; a comma-separated list
+         *     passes when any member names the current version. Missing → `428
          *     PRECONDITION_REQUIRED`; stale or malformed → `412
          *     PRECONDITION_FAILED`. `*` is accepted only when the resource does not
-         *     exist yet (create-or-replace semantics).
+         *     exist yet (create-or-replace semantics). A weak indicator (`W/`) on
+         *     a tag is ignored: the server only issues strong tags, but a
+         *     compressing proxy can weaken one in transit, and the opaque part
+         *     still has to match exactly. This deliberately departs from the strong
+         *     comparison RFC 9110 §13.1.1 prescribes for `If-Match`.
          */
         IfMatch: string;
         /**
@@ -2228,7 +2240,10 @@ export interface components {
         /**
          * @description Strong entity tag of the returned resource's current version — a
          *     quoted string clients echo verbatim in `If-Match` on the next
-         *     mutation.
+         *     mutation. Every `/v1` response carries `Cache-Control: no-store,
+         *     no-transform` so compliant intermediaries leave the tag (and the
+         *     body) unchanged; a tag a proxy weakened to `W/"…"` is still accepted
+         *     in `If-Match`.
          */
         ETag: string;
     };
@@ -2318,7 +2333,7 @@ export interface operations {
             /** @description Portal session ended; continue at the identity provider. */
             200: {
                 headers: {
-                    "Cache-Control"?: "no-store";
+                    "Cache-Control"?: "no-store, no-transform";
                     [name: string]: unknown;
                 };
                 content: {
@@ -2351,7 +2366,7 @@ export interface operations {
             /** @description All portal sessions ended; continue at the identity provider. */
             200: {
                 headers: {
-                    "Cache-Control"?: "no-store";
+                    "Cache-Control"?: "no-store, no-transform";
                     [name: string]: unknown;
                 };
                 content: {
@@ -2851,11 +2866,16 @@ export interface operations {
             query?: never;
             header: {
                 /**
-                 * @description Strong entity tag of the resource's current version, as returned in
-                 *     the `ETag` header or body of the last read/write. Missing → `428
+                 * @description Entity tag of the resource's current version, as returned in the
+                 *     `ETag` header or body of the last read/write; a comma-separated list
+                 *     passes when any member names the current version. Missing → `428
                  *     PRECONDITION_REQUIRED`; stale or malformed → `412
                  *     PRECONDITION_FAILED`. `*` is accepted only when the resource does not
-                 *     exist yet (create-or-replace semantics).
+                 *     exist yet (create-or-replace semantics). A weak indicator (`W/`) on
+                 *     a tag is ignored: the server only issues strong tags, but a
+                 *     compressing proxy can weaken one in transit, and the opaque part
+                 *     still has to match exactly. This deliberately departs from the strong
+                 *     comparison RFC 9110 §13.1.1 prescribes for `If-Match`.
                  */
                 "If-Match": components["parameters"]["IfMatch"];
             };
@@ -2948,11 +2968,16 @@ export interface operations {
             query?: never;
             header: {
                 /**
-                 * @description Strong entity tag of the resource's current version, as returned in
-                 *     the `ETag` header or body of the last read/write. Missing → `428
+                 * @description Entity tag of the resource's current version, as returned in the
+                 *     `ETag` header or body of the last read/write; a comma-separated list
+                 *     passes when any member names the current version. Missing → `428
                  *     PRECONDITION_REQUIRED`; stale or malformed → `412
                  *     PRECONDITION_FAILED`. `*` is accepted only when the resource does not
-                 *     exist yet (create-or-replace semantics).
+                 *     exist yet (create-or-replace semantics). A weak indicator (`W/`) on
+                 *     a tag is ignored: the server only issues strong tags, but a
+                 *     compressing proxy can weaken one in transit, and the opaque part
+                 *     still has to match exactly. This deliberately departs from the strong
+                 *     comparison RFC 9110 §13.1.1 prescribes for `If-Match`.
                  */
                 "If-Match": components["parameters"]["IfMatch"];
             };
@@ -3003,11 +3028,16 @@ export interface operations {
             query?: never;
             header: {
                 /**
-                 * @description Strong entity tag of the resource's current version, as returned in
-                 *     the `ETag` header or body of the last read/write. Missing → `428
+                 * @description Entity tag of the resource's current version, as returned in the
+                 *     `ETag` header or body of the last read/write; a comma-separated list
+                 *     passes when any member names the current version. Missing → `428
                  *     PRECONDITION_REQUIRED`; stale or malformed → `412
                  *     PRECONDITION_FAILED`. `*` is accepted only when the resource does not
-                 *     exist yet (create-or-replace semantics).
+                 *     exist yet (create-or-replace semantics). A weak indicator (`W/`) on
+                 *     a tag is ignored: the server only issues strong tags, but a
+                 *     compressing proxy can weaken one in transit, and the opaque part
+                 *     still has to match exactly. This deliberately departs from the strong
+                 *     comparison RFC 9110 §13.1.1 prescribes for `If-Match`.
                  */
                 "If-Match": components["parameters"]["IfMatch"];
             };
@@ -3085,11 +3115,16 @@ export interface operations {
             query?: never;
             header: {
                 /**
-                 * @description Strong entity tag of the resource's current version, as returned in
-                 *     the `ETag` header or body of the last read/write. Missing → `428
+                 * @description Entity tag of the resource's current version, as returned in the
+                 *     `ETag` header or body of the last read/write; a comma-separated list
+                 *     passes when any member names the current version. Missing → `428
                  *     PRECONDITION_REQUIRED`; stale or malformed → `412
                  *     PRECONDITION_FAILED`. `*` is accepted only when the resource does not
-                 *     exist yet (create-or-replace semantics).
+                 *     exist yet (create-or-replace semantics). A weak indicator (`W/`) on
+                 *     a tag is ignored: the server only issues strong tags, but a
+                 *     compressing proxy can weaken one in transit, and the opaque part
+                 *     still has to match exactly. This deliberately departs from the strong
+                 *     comparison RFC 9110 §13.1.1 prescribes for `If-Match`.
                  */
                 "If-Match": components["parameters"]["IfMatch"];
             };
@@ -3167,11 +3202,16 @@ export interface operations {
             query?: never;
             header: {
                 /**
-                 * @description Strong entity tag of the resource's current version, as returned in
-                 *     the `ETag` header or body of the last read/write. Missing → `428
+                 * @description Entity tag of the resource's current version, as returned in the
+                 *     `ETag` header or body of the last read/write; a comma-separated list
+                 *     passes when any member names the current version. Missing → `428
                  *     PRECONDITION_REQUIRED`; stale or malformed → `412
                  *     PRECONDITION_FAILED`. `*` is accepted only when the resource does not
-                 *     exist yet (create-or-replace semantics).
+                 *     exist yet (create-or-replace semantics). A weak indicator (`W/`) on
+                 *     a tag is ignored: the server only issues strong tags, but a
+                 *     compressing proxy can weaken one in transit, and the opaque part
+                 *     still has to match exactly. This deliberately departs from the strong
+                 *     comparison RFC 9110 §13.1.1 prescribes for `If-Match`.
                  */
                 "If-Match": components["parameters"]["IfMatch"];
             };
@@ -3216,11 +3256,16 @@ export interface operations {
             query?: never;
             header: {
                 /**
-                 * @description Strong entity tag of the resource's current version, as returned in
-                 *     the `ETag` header or body of the last read/write. Missing → `428
+                 * @description Entity tag of the resource's current version, as returned in the
+                 *     `ETag` header or body of the last read/write; a comma-separated list
+                 *     passes when any member names the current version. Missing → `428
                  *     PRECONDITION_REQUIRED`; stale or malformed → `412
                  *     PRECONDITION_FAILED`. `*` is accepted only when the resource does not
-                 *     exist yet (create-or-replace semantics).
+                 *     exist yet (create-or-replace semantics). A weak indicator (`W/`) on
+                 *     a tag is ignored: the server only issues strong tags, but a
+                 *     compressing proxy can weaken one in transit, and the opaque part
+                 *     still has to match exactly. This deliberately departs from the strong
+                 *     comparison RFC 9110 §13.1.1 prescribes for `If-Match`.
                  */
                 "If-Match": components["parameters"]["IfMatch"];
             };

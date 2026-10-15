@@ -9,10 +9,13 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -20,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	toolscache "k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -326,7 +330,19 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	// heartbeat — must stay well under broker.MaxBindingAge (15 s) so a
 	// stalled watch stops issuance (fail closed).
 	bindingResync := 5 * time.Second
-	cacheOpts := crcache.Options{Scheme: scheme, SyncPeriod: &bindingResync}
+	// The status view reads its watch health from the cache's list/watch
+	// failures; it is created after the cache, so the handler reaches it
+	// through a pointer set before the cache starts.
+	var statusViewRef atomic.Pointer[api.K8sStatusView]
+	cacheOpts := crcache.Options{
+		Scheme: scheme, SyncPeriod: &bindingResync,
+		DefaultWatchErrorHandler: func(ctx context.Context, r *toolscache.Reflector, err error) {
+			toolscache.DefaultWatchErrorHandler(ctx, r, err)
+			if sv := statusViewRef.Load(); sv != nil {
+				sv.NoteWatchError(r.TypeDescription(), err)
+			}
+		},
+	}
 	if len(tenants) > 0 {
 		cacheOpts.DefaultNamespaces = map[string]crcache.Config{}
 		for _, ns := range tenants {
@@ -372,6 +388,14 @@ func (b *Backend) wireMerged(ctx context.Context, cfg Config, id broker.GatewayI
 	if err != nil {
 		return fmt.Errorf("status view: %w", err)
 	}
+	statusViewRef.Store(statusView)
+	// Liveness heartbeat for an idle watch: while no Workspace changes, an
+	// uncached one-item list proves the API server still serves the
+	// resource, so a quiet tenant stays fresh and an unreachable API server
+	// does not.
+	b.bg = append(b.bg, func(ctx context.Context) {
+		statusView.RunLiveness(ctx, api.WorkspaceListProbe(kc, slices.Sorted(maps.Keys(cacheOpts.DefaultNamespaces))), bindingResync)
+	})
 	if err := registerBootRecorder(ctx, kcache, db, metrics, log); err != nil {
 		return fmt.Errorf("boot recorder: %w", err)
 	}

@@ -166,7 +166,11 @@ The v1.0 API surface added in the W0/W1 waves:
   unknown verbs and colons inside ids.
 - `internal/api/etag_test.go` — the strong ETag + `If-Match`
   precondition the admin mutations rely on (TM-17):
-  `TestETagOf_StrongQuotedStable`, `TestCheckIfMatch_Matrix` (428/412).
+  `TestETagOf_StrongQuotedStable`, `TestCheckIfMatch_Matrix` (428/412;
+  a proxy-weakened `W/` echo of the current tag passes, a weakened stale
+  tag is still 412). Handler level: `TestSessionPolicy_WeakIfMatchBehindProxy`
+  (`adminsessionpolicy_test.go`) and `TestApplySessionPolicy_WeakIfMatch`
+  (`adminsessionpolicyapply_test.go`).
 - `internal/api/page_test.go` — list pagination (TM-04):
   `TestParsePage_DefaultsAndBounds` (`limit` default 50, max 500),
   `TestCursor_RoundTrip`, `TestCursor_RejectsSortMismatchAndTamper`.

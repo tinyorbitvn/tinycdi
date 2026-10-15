@@ -107,7 +107,7 @@ func (a *Authenticator) RevokeAllSessionsHandler(w http.ResponseWriter, r *http.
 	http.SetCookie(w, a.sessionCookie("", -1))
 	if end := a.endSessionURL(sess.IDToken); end != "" {
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Cache-Control", APICacheControl)
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(LogoutResult{EndSessionURL: end})
 		return

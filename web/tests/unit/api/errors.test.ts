@@ -35,6 +35,7 @@ const GENERATED: { [K in GeneratedCode]: true } = {
   PRECONDITION_FAILED: true,
   CONNECTION_IN_USE: true,
   IMAGE_STALE: true,
+  ALREADY_EXISTS: true,
   RATE_LIMITED: true,
   UNAVAILABLE: true,
   INTERNAL: true,

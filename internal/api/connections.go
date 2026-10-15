@@ -192,7 +192,7 @@ func (h *ConnectionHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	// The response carries a bearer-equivalent ticket: it must never be
 	// stored by a shared/private cache (SEC-I7).
-	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Cache-Control", APICacheControl)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	var resolved *provisioning.SessionPolicy

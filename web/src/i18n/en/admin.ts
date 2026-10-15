@@ -295,6 +295,8 @@ export default {
   "admin.sessions.confirm.body":
     "Every portal session of this user ends and their open desktops disconnect. Their workspaces keep running.",
   "admin.sessions.done": "Signed out: {sessions} portal sessions, {leases} desktop sessions.",
+  "admin.sessions.selfSignedOut":
+    "Your own portal session was signed out too. Taking you to the signed-out page…",
 
   // Session policy page (tenant clipboard ceiling, ADR 0009).
   "admin.policy.title": "Session policy",

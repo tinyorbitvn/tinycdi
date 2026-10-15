@@ -103,8 +103,8 @@ func TestCreateConnection_IssuesTicket(t *testing.T) {
 		t.Fatalf("status=%d body=%s, want 201", r.StatusCode, b)
 	}
 	// SEC-I7: the ticket is bearer-equivalent — never cacheable.
-	if cc := r.Header.Get("Cache-Control"); cc != "no-store" {
-		t.Fatalf("Cache-Control=%q, want no-store", cc)
+	if cc := r.Header.Get("Cache-Control"); cc != "no-store, no-transform" {
+		t.Fatalf("Cache-Control=%q, want no-store, no-transform", cc)
 	}
 	var view struct {
 		WorkspaceID string    `json:"workspaceId"`

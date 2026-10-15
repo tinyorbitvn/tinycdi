@@ -457,6 +457,16 @@ func TestCreateWorkspaceErrorMapping(t *testing.T) {
 		t.Fatalf("idem: status=%d", r.StatusCode)
 	}
 	r.Body.Close()
+
+	// duplicate name -> 409 ALREADY_EXISTS (not the retryable INVALID_STATE:
+	// retrying the same name can never succeed)
+	be.createErr = provisioning.ErrNameTaken
+	r = doReq(t, env, sess, csrf, http.MethodPost, "/v1/workspaces", body,
+		map[string]string{"Idempotency-Key": "key-name-000"})
+	if e := errBody(t, r); r.StatusCode != http.StatusConflict || e.Code != "ALREADY_EXISTS" || e.Retryable ||
+		e.Message != "a workspace with this name already exists; choose a different name" {
+		t.Fatalf("name taken: status=%d err=%+v", r.StatusCode, e)
+	}
 	be.createErr = nil
 
 	// unknown template -> 422 INVALID_TEMPLATE
