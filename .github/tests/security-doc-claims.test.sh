@@ -83,4 +83,16 @@ need R1-29 docs/releases/v1.0.0.md 'The browser sandbox profile allows namespace
 need R1-29 deploy/node-profiles/README.md 'a custom `Localhost` profile that also allows namespace creation is not detected'
 need_row R1-29 TM-47 'a custom `Localhost` profile that allows namespace creation is not detected'
 
+# R1-15: trusted-proxy guidance never trusts a workspace pod range; TM-34
+# says the unrestricted opt-out exposes the backend edge to workspaces.
+need R1-15 docs/runbooks/install.md '[Nn]ever list the cluster pod CIDR or any range where workspace pods run'
+absent R1-15 docs/runbooks/install.md 'list the cluster pod CIDR \(shown'
+need R1-15 deploy/helm/tinycdi/README.md '[Nn]ever list the cluster pod CIDR'
+absent R1-15 deploy/helm/tinycdi/README.md 'pod CIDR containing the traefik pods'
+need_row R1-15 TM-34 'edgeIngressCIDRs.*admits workspace pods'
+need_row R1-15 TM-34 'backend\.trustedProxies` must never cover'
+# R1-36: no dead podSecurity value is documented.
+absent R1-36 deploy/helm/tinycdi/README.md 'platformEnforce'
+absent R1-36 deploy/helm/tinycdi/values.yaml 'platformEnforce'
+
 exit "$fails"

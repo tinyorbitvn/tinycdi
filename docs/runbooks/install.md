@@ -387,10 +387,21 @@ backend:
 
 ```yaml
 # Traefik or another ingress running as pods — the peer is the proxy pod
-# IP; list the cluster pod CIDR (shown: 10.42.0.0/16) or a tighter range.
+# IP. List only addresses the proxy pods can hold: an IP pool dedicated
+# to the ingress namespace (shown) or, for a hostNetwork proxy, the node
+# subnet.
 backend:
-  trustedProxies: ["10.42.0.0/16"]
+  trustedProxies: ["10.42.250.0/24"]
 ```
+
+Never list the cluster pod CIDR or any range where workspace pods run.
+A peer inside `backend.trustedProxies` chooses, through
+`X-Forwarded-For`, the client address the backend keys its rate limits
+on and forwards toward workspace pods. With
+`runtime.networkProfiles.clusterOnly.unrestricted=true` a workspace can
+reach the backend directly (the edge ingress admits
+`networkPolicy.edgeIngressCIDRs`, `0.0.0.0/0` by default), and the chart
+NOTES print a warning for that combination.
 
 No edge proxy at all needs nothing — the peer already is the client.
 Rates are tunable via `backend.extraArgs` (`-login-rate`, `-launch-rate`;

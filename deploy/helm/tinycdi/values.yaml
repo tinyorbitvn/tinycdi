@@ -355,6 +355,8 @@ backend:
   # the IPv4 ones or v6 clients collapse into the proxy's /64 bucket.
   # See the README "Rate limits and trusted proxies" for Cilium/Traefik
   # examples.
+  # Never list a range where workspace pods run (the cluster pod CIDR): a
+  # trusted peer picks its own client key through X-Forwarded-For.
   # Authenticated traffic keys per session (session probe, live-session
   # re-launches) or per validated OIDC state (callback, bounded by a 10x
   # per-IP ceiling), not per client IP; the anonymous surface — login
@@ -892,13 +894,13 @@ templates: []
   #   appArmorProfile: tinycdi-browser
   #   spec: { ... experience: Browser ... }
 
-# Pod Security Standards enforcement labels for the namespaces the chart
-# creates. Platform namespace allows baseline (infra images), managed
-# namespaces run restricted runtime pods. managedEnforce=privileged is
+# Pod Security Standards level for the managed (tenant) namespaces the
+# chart creates — their enforce and warn labels. The release namespace is
+# created and labelled by the installer (docs/runbooks/install.md,
+# "Install"); the chart never labels it. managedEnforce=privileged is
 # refused unless dev.enabled — it would reopen operator→privileged-pod
 # (CHTR-2).
 podSecurity:
-  platformEnforce: baseline
   managedEnforce: restricted
 
 # Explicit development-mode gate. While false (the only supported value

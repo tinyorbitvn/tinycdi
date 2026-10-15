@@ -322,3 +322,38 @@ func TestEdgeIngressSchemaKeys(t *testing.T) {
 		renderArgs(t, "-f", minimalValues, "--set", "networkPolicy.edgeIngress="+mode)
 	}
 }
+
+// TestNotesWarnUnrestrictedEdgeOpen (R1-15, TM-34): with the ClusterOnly
+// unrestricted opt-out, workspace pods can reach any pod; when the
+// backend's edge ingress also admits every source, NOTES warns once and
+// tells the operator never to trust a workspace pod range in
+// backend.trustedProxies. A narrowed edge range, or the restricted
+// default, renders no warning.
+func TestNotesWarnUnrestrictedEdgeOpen(t *testing.T) {
+	const marker = "Edge ingress: WARNING"
+	unrestricted := "runtime.networkProfiles.clusterOnly.unrestricted=true"
+	cases := []struct {
+		name string
+		sets []string
+		warn bool
+	}{
+		{"restricted default", nil, false},
+		{"unrestricted, default 0.0.0.0/0", []string{"--set", unrestricted}, true},
+		{"unrestricted, edgeIngress any", []string{"--set", unrestricted, "--set", "networkPolicy.edgeIngress=any"}, true},
+		{"unrestricted, networkPolicy off", []string{"--set", unrestricted, "--set", "networkPolicy.enabled=false"}, true},
+		{"unrestricted, narrowed CIDRs", []string{"--set", unrestricted, "--set-json", `networkPolicy.edgeIngressCIDRs=["192.0.2.0/24"]`}, false},
+	}
+	for _, tc := range cases {
+		notes := renderNotes(t, append([]string{"-f", minimalValues}, tc.sets...)...)
+		n := strings.Count(notes, marker)
+		if tc.warn && (n != 1 || !strings.Contains(notes, "backend.trustedProxies") || !strings.Contains(notes, ":8443/:8444")) {
+			t.Errorf("%s: want one %q naming backend.trustedProxies and :8443/:8444, got %d:\n%s", tc.name, marker, n, notes)
+		}
+		if !tc.warn && n != 0 {
+			t.Errorf("%s: want no %q, got:\n%s", tc.name, marker, notes)
+		}
+		if strings.Count(notes, "ClusterOnly egress") > 1 {
+			t.Errorf("%s: the edge warning must not repeat the ClusterOnly egress line:\n%s", tc.name, notes)
+		}
+	}
+}

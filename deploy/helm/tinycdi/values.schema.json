@@ -514,7 +514,6 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "platformEnforce": {"type": "string", "enum": ["privileged", "baseline", "restricted"]},
         "managedEnforce": {"type": "string", "enum": ["privileged", "baseline", "restricted"]}
       }
     },

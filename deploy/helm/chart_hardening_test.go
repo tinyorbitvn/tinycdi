@@ -9,8 +9,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // ---------------------------------------------------------------------------
@@ -454,5 +457,42 @@ func TestHardeningTenantAdminGroups(t *testing.T) {
 	out = renderErrArgs(t, "-f", vf, "--set", `oidc.tenantAdminGroups[0]=a\,b`)
 	if !strings.Contains(out, "tenantAdminGroups") && !strings.Contains(out, "pattern") {
 		t.Errorf("comma-containing tenantAdminGroups entry must be rejected, got: %s", out)
+	}
+}
+
+// TestPodSecurityValuesAllReferenced (R1-36): every key under podSecurity
+// in values.yaml is read by some template — a value that does nothing
+// tells an operator a control is on when it is not.
+func TestPodSecurityValuesAllReferenced(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("tinycdi", "values.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var values struct {
+		PodSecurity map[string]any `yaml:"podSecurity"`
+	}
+	if err := yaml.Unmarshal(raw, &values); err != nil {
+		t.Fatal(err)
+	}
+	if len(values.PodSecurity) == 0 {
+		t.Fatal("values.yaml has no podSecurity keys")
+	}
+	files, err := filepath.Glob(filepath.Join("tinycdi", "templates", "*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var src strings.Builder
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		src.Write(b)
+	}
+	for key := range values.PodSecurity {
+		re := regexp.MustCompile(`\.Values\.podSecurity\.` + regexp.QuoteMeta(key) + `\b`)
+		if !re.MatchString(src.String()) {
+			t.Errorf("podSecurity.%s is set in values.yaml but no template reads it", key)
+		}
 	}
 }

@@ -95,7 +95,7 @@ objects. It **keeps**:
 |---|---|---|
 | `portalHost` / `sessionDomain` | `*.example.invalid` | public portal hostname / session domain — sessions run on `<label>.<sessionDomain>` behind the `*.<sessionDomain>` wildcard route; `portalHost` must not equal or sit inside `sessionDomain` (render-time guard) |
 | `managedNamespaces[]` | `[]` | `{name, tenant, quota?, quotaCeiling?, namespaceQuota?}` — tenant namespaces created with `resource-policy: keep`; `quota` declares the tenant's limits (see "Tenant quotas"); `quotaCeiling` instead lets the tenant's admins set the quota up to it; and `namespaceQuota` renders a Kubernetes ResourceQuota/LimitRange (see "Namespace object quotas"). The operator's manager-role is bound ONLY here and `--watch-namespaces` lists exactly these (never the release namespace); with an empty list the operator watches all namespaces, which its RBAC denies |
-| `podSecurity.platformEnforce` / `.managedEnforce` | `baseline` / `restricted` | PSS labels on created namespaces; `managedEnforce=privileged` needs `dev.enabled` (CHTR-2) |
+| `podSecurity.managedEnforce` | `restricted` | PSS `enforce`/`warn` label on the managed namespaces the chart creates (the installer labels the release namespace — see the install runbook); `privileged` needs `dev.enabled` (CHTR-2) |
 
 ### Credentials (existing Secrets only — never values)
 
@@ -598,10 +598,12 @@ gatewayApi:
 ```
 
 ```yaml
-# Traefik (or any ingress as pods) — the peer is the proxy pod's address;
-# list the cluster pod CIDR or a tighter range covering the proxy pods.
+# Traefik (or any ingress as pods) — the peer is the proxy pod's address.
+# List only an IP pool dedicated to the ingress namespace (or the node
+# subnet for a hostNetwork proxy). Never list the cluster pod CIDR or any
+# range where workspace pods run: a trusted peer picks its own client key.
 backend:
-  trustedProxies: ["10.42.0.0/16"]      # pod CIDR containing the traefik pods
+  trustedProxies: ["10.42.250.0/24"]    # IP pool of the ingress namespace
 ingress:
   enabled: true
 ```
