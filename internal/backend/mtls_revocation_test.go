@@ -436,7 +436,7 @@ func TestRevokedSerialWarnAndMetric(t *testing.T) {
 	ca := newTestCANamed(t, "internal-ca")
 	blocked := ca.signSerial(t, "operator", 0x4f8b)
 
-	var buf bytes.Buffer
+	var buf lockedBuffer
 	log := slog.New(slog.NewJSONHandler(&buf, nil))
 	reg := prometheus.NewRegistry()
 	metrics := observability.NewMetrics(reg, nil)
