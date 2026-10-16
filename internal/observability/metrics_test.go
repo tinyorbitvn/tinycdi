@@ -44,6 +44,7 @@ func TestMetricCatalogueRegistered(t *testing.T) {
 	m.AddSessionsActive(2)
 	m.IncRehydration("ok")
 	m.IncStreamsFenced()
+	m.IncIdleRelease("released")
 	m.AddConnectionTokensDropped(2)
 	m.IncLogin("success")
 	m.SetRuntimeImageAge("browser", 3600)
@@ -75,6 +76,7 @@ func TestMetricCatalogueRegistered(t *testing.T) {
 		"tinycdi_sessions_active",
 		"tinycdi_gateway_rehydrations_total",
 		"tinycdi_gateway_streams_fenced_total",
+		"tinycdi_gateway_idle_release_total",
 		"tinycdi_gateway_connection_tokens_dropped_total",
 		"tinycdi_logins_total",
 		"tinycdi_runtime_image_age_seconds",
@@ -280,5 +282,34 @@ tinycdi_audit_write_errors_total{event="other"} 1
 `), "tinycdi_audit_write_errors_total")
 	if err != nil {
 		t.Fatalf("audit write error metrics mismatch:\n%v", err)
+	}
+}
+
+// TestIdleReleaseResultBounded: the idle-release result label stays inside
+// its bounded set — anything else folds into "other".
+func TestIdleReleaseResultBounded(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewMetrics(reg, nil)
+	m.IncIdleRelease("released")
+	m.IncIdleRelease("lease-123")
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]float64{}
+	for _, mf := range mfs {
+		if mf.GetName() != "tinycdi_gateway_idle_release_total" {
+			continue
+		}
+		for _, met := range mf.GetMetric() {
+			for _, l := range met.GetLabel() {
+				if l.GetName() == "result" {
+					got[l.GetValue()] = met.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	if len(got) != 2 || got["released"] != 1 || got["other"] != 1 {
+		t.Fatalf("idle release series = %v, want released=1 other=1", got)
 	}
 }

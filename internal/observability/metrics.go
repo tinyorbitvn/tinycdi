@@ -82,6 +82,14 @@ var (
 	frameReloadDests = map[string]struct{}{
 		"iframe": {}, "document": {},
 	}
+	// idleReleaseResults are the gateway idle-release outcomes: released
+	// = the broker ended the lease; refused = the broker kept it (a newer
+	// stream claim, or a stream still counted open); lapsed = this replica
+	// did not own the current stream epoch and only stopped renewing;
+	// error = the release call failed (the lease lapses at its TTL).
+	idleReleaseResults = map[string]struct{}{
+		"released": {}, "refused": {}, "lapsed": {}, "error": {},
+	}
 	// sessionRevokeResults are the sign-out revocation outcomes (TM-07):
 	// ok = the lease store accepted the revoke (zero or more of the
 	// session's leases and outstanding tickets ended); error = the store
@@ -167,6 +175,8 @@ type Metrics struct {
 	sessionsActive prometheus.Gauge
 	rehydrations   *prometheus.CounterVec
 	streamsFenced  prometheus.Counter
+	// idleReleases counts idle-session releases by bounded result.
+	idleReleases *prometheus.CounterVec
 	// upstreamStreams is the replica-wide count of upstream-bound
 	// requests in flight on the session gateway (V11 stream bound).
 	upstreamStreams prometheus.Gauge
@@ -256,6 +266,10 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 			Namespace: metricNamespace, Name: "gateway_streams_fenced_total",
 			Help: "Streams closed because another replica claimed the lease's stream epoch.",
 		}),
+		idleReleases: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace, Name: "gateway_idle_release_total",
+			Help: "Attached sessions this replica stopped serving after -idle-session-release with no request, stream, upgrade or file transfer in flight, by bounded result: released (the broker ended the lease), refused (the broker kept it: a newer stream claim or an open stream), lapsed (this replica did not own the current stream epoch and only stopped renewing), error (the release call failed; the lease lapses at its TTL).",
+		}, []string{"result"}),
 		upstreamStreams: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: metricNamespace, Name: "gateway_upstream_streams",
 			Help: "Upstream-bound requests in flight on this replica's session gateway — websocket streams and plain proxied requests summed over workspaces; each workspace is separately bounded by -session-stream-cap.",
@@ -336,7 +350,7 @@ func NewMetrics(reg prometheus.Registerer, tenantAllowlist []string) *Metrics {
 	reg.MustRegister(
 		m.httpRequests, m.httpDuration, m.provisioning, m.running, m.reserved,
 		m.leaseFailures, m.stuckFinalizer, m.quotaDrift, m.pvcLeaks, m.bootDeadline,
-		m.sessionsActive, m.rehydrations, m.streamsFenced, m.upstreamStreams, m.connTokensDropped, m.logins, m.imageAge,
+		m.sessionsActive, m.rehydrations, m.streamsFenced, m.idleReleases, m.upstreamStreams, m.connTokensDropped, m.logins, m.imageAge,
 		m.rateLimited, m.rateLimitStore, m.rateLimitDown, m.frameReloads, m.sessionRevokes,
 		m.sessionRevokeAlls, m.leaseSessGone, m.auditWriteErrs,
 		m.internalAuthFailures, m.retentionPruned, m.retentionLastOK,
@@ -435,6 +449,12 @@ func (m *Metrics) IncRehydration(result string) {
 // a stream epoch newer than the one this process claimed, so its streams
 // closed.
 func (m *Metrics) IncStreamsFenced() { m.streamsFenced.Inc() }
+
+// IncIdleRelease counts one idle-session release decision on the session
+// gateway; result is bounded to {released, refused, lapsed, error, other}.
+func (m *Metrics) IncIdleRelease(result string) {
+	m.idleReleases.WithLabelValues(boundValue(result, idleReleaseResults)).Inc()
+}
 
 // SetUpstreamStreams reports the replica-wide count of upstream-bound
 // requests the session gateway currently holds (the V11 per-workspace

@@ -38,6 +38,11 @@ type SessionDirectory interface {
 	// ownerTab is the validated tab id the client sent on the upgrade; an
 	// invalid one is refused with broker.ErrOwnerTabInvalid.
 	ClaimStream(ctx context.Context, gw broker.GatewayIdentity, leaseID string, fence broker.Fence, ownerTab string) (uint64, error)
+	// ReleaseIdleLease ends the lease if it is still idle at the broker:
+	// active, held by gw under fence, stream epoch still == epoch (no
+	// claim since) and no stream counted open. false with a nil error is
+	// a refusal — the lease stays live.
+	ReleaseIdleLease(ctx context.Context, gw broker.GatewayIdentity, leaseID string, fence broker.Fence, epoch uint64) (bool, error)
 }
 
 // sessionDigest derives the stored lookup key for a session cookie value —

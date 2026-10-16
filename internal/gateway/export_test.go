@@ -40,3 +40,19 @@ func (g *Gateway) UpstreamStreamCount(wsID string) (total, forWorkspace int) {
 	defer g.streamMu.Unlock()
 	return g.upstreamInFlight, g.upstreamSlots[wsID]
 }
+
+// SessionBusy reports, for the session this replica maps to wsUID,
+// whether anything that pins it against the idle release is in flight (a
+// tracked request, a stream conn, an upgrade admission or a file
+// transfer); ok is false when no session is mapped.
+func (g *Gateway) SessionBusy(wsUID string) (busy, ok bool) {
+	g.mu.Lock()
+	s := g.byWorkspace[wsUID]
+	g.mu.Unlock()
+	if s == nil {
+		return false, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.busyLocked(), true
+}

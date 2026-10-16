@@ -103,6 +103,20 @@ type session struct {
 	// replica — the local half of "the lease already had a stream" for
 	// the frame-reload counter (streamEpoch covers the directory mode).
 	streamSeen bool
+	// lastActive is the gateway clock time of the last request seen on
+	// this session's own host (noteAttached) or of the last in-flight
+	// work ending (untrack, endUpgrade, endTransfer). The idle release
+	// measures from it, and only while nothing is in flight (busyLocked).
+	lastActive time.Time
+	// transfers counts file transfers in flight: they are neither tracked
+	// requests nor stream conns, but a download still running after its
+	// tab closed needs the lease.
+	transfers int
+	// ownEpoch is the stream epoch THIS replica claimed (claimStream);
+	// zero if it never claimed. Only while ownEpoch == streamEpoch does
+	// this replica own the lease's current stream and may ask the broker
+	// to release the lease.
+	ownEpoch uint64
 }
 
 // sessionMints counts newSession calls. A test cannot intercept a
@@ -180,10 +194,12 @@ func (s *session) workspaceUID() string {
 // abandoned the launch between ticket redemption and delivery left it a
 // ghost no browser holds. The write runs under s.mu so it serializes
 // against the reap decision — an attach that wins the lock aborts the
-// reap.
-func (s *session) noteAttached() {
+// reap. Every such request — refused ones included — also restarts the
+// idle-release window: a client retrying is a live client.
+func (s *session) noteAttached(now time.Time) {
 	s.mu.Lock()
 	s.attached = true
+	s.lastActive = now
 	s.mu.Unlock()
 }
 
@@ -248,7 +264,7 @@ func (s *session) track(ctx context.Context) (context.Context, int, bool) {
 	return cctx, id, true
 }
 
-func (s *session) untrack(id int, conn net.Conn) {
+func (s *session) untrack(id int, conn net.Conn, now time.Time) {
 	s.mu.Lock()
 	if c, ok := s.cancels[id]; ok {
 		delete(s.cancels, id)
@@ -257,6 +273,7 @@ func (s *session) untrack(id int, conn net.Conn) {
 	if conn != nil {
 		delete(s.conns, conn)
 	}
+	s.lastActive = now
 	s.mu.Unlock()
 }
 
@@ -363,6 +380,29 @@ func (s *session) streamBusy() bool {
 	return s.upgradeInFlight || len(s.conns) > 0
 }
 
+// busyLocked reports in-flight work that pins the session against the idle
+// release: a tracked request, a stream conn (fenced conns stay mapped until
+// their request unwinds), an upgrade admission or a file transfer. Caller
+// holds s.mu.
+func (s *session) busyLocked() bool {
+	return len(s.cancels) > 0 || len(s.conns) > 0 || s.upgradeInFlight || s.transfers > 0
+}
+
+// beginTransfer / endTransfer bracket a file transfer: the session is busy
+// while one runs, and its end restarts the idle window.
+func (s *session) beginTransfer() {
+	s.mu.Lock()
+	s.transfers++
+	s.mu.Unlock()
+}
+
+func (s *session) endTransfer(now time.Time) {
+	s.mu.Lock()
+	s.transfers--
+	s.lastActive = now
+	s.mu.Unlock()
+}
+
 // pendingActivity reports undelivered activity reports: events still in the
 // queue plus reports whose broker call has not returned.
 func (s *session) pendingActivity() int {
@@ -372,12 +412,16 @@ func (s *session) pendingActivity() int {
 }
 
 // setStreamEpoch records the stream epoch ClaimStream returned — the fence
-// other replicas will compare their renewed leases against.
+// other replicas will compare their renewed leases against — and remembers
+// it as this replica's own claim (the idle release's ownership test).
 func (s *session) setStreamEpoch(epoch uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if epoch > s.streamEpoch {
 		s.streamEpoch = epoch
+	}
+	if epoch > s.ownEpoch {
+		s.ownEpoch = epoch
 	}
 }
 
@@ -407,11 +451,12 @@ func (s *session) setStreamTrack(id int) {
 // endUpgrade releases the stream slot only if gen still owns the
 // reservation. A fenced older stream returning from ServeHTTP must not
 // clear a newer upgrade's in-flight admission.
-func (s *session) endUpgrade(gen int) {
+func (s *session) endUpgrade(gen int, now time.Time) {
 	s.mu.Lock()
 	if s.upgradeInFlight && s.upgradeGen == gen {
 		s.upgradeInFlight = false
 	}
+	s.lastActive = now
 	s.mu.Unlock()
 }
 
@@ -602,6 +647,20 @@ func (g *Gateway) renewLoop(s *session) {
 			g.killSession(s, "unattached_expired")
 			return
 		}
+		// Idle release: an attached session with nothing in flight for
+		// IdleSessionRelease stops being served here. The decision and
+		// the broker call share s.mu exactly like the ghost reap, so a
+		// request that attaches first aborts the release and one that
+		// comes after finds a dying session.
+		if g.cfg.IdleSessionRelease > 0 {
+			if result, ok := g.releaseIdle(s); ok {
+				if g.cfg.Metrics != nil {
+					g.cfg.Metrics.IncIdleRelease(result)
+				}
+				g.killSession(s, "idle_released")
+				return
+			}
+		}
 		if !s.live(g) {
 			g.killSession(s, "renew_deadline")
 			return
@@ -666,6 +725,52 @@ func (g *Gateway) reapUnattached(s *session) bool {
 		}
 	}
 	return true
+}
+
+// Idle-release results — the tinycdi_gateway_idle_release_total labels.
+const (
+	idleReleased = "released"
+	idleRefused  = "refused"
+	idleLapsed   = "lapsed"
+	idleError    = "error"
+)
+
+// releaseIdle is the idle release's atomic decision, run under s.mu like
+// reapUnattached: it refuses (ok=false) unless the session is attached,
+// alive, has nothing in flight and saw no activity for IdleSessionRelease.
+// Otherwise the caller must kill the session (ok=true) and result says
+// what happened to the lease. Only the replica whose own claim is the
+// lease's current stream epoch asks the broker to release it — a replica
+// that never claimed, or whose stream another replica fenced, just stops
+// renewing (lapsed), because a replica still serving a stream keeps the
+// lease alive with its own renews. A refused or failed release still
+// kills: with renewal stopped the lease lapses inside one lease TTL. The
+// lease fields are read directly: the leaseID()/fenceSnapshot() helpers
+// take s.mu, which this function already holds.
+func (g *Gateway) releaseIdle(s *session) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.attached || s.deadLocked() || s.busyLocked() ||
+		g.now().Sub(s.lastActive) < g.cfg.IdleSessionRelease {
+		return "", false
+	}
+	if g.cfg.Sessions == nil || s.ownEpoch == 0 || s.ownEpoch != s.streamEpoch {
+		return idleLapsed, true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	released, err := g.cfg.Sessions.ReleaseIdleLease(ctx, g.cfg.Identity, s.lease.ID, s.fence, s.ownEpoch)
+	cancel()
+	switch {
+	case err != nil:
+		if g.cfg.Logger != nil {
+			g.cfg.Logger.Warn("idle session: lease release failed — lease lapses at TTL", "err", err)
+		}
+		return idleError, true
+	case released:
+		return idleReleased, true
+	default:
+		return idleRefused, true
+	}
 }
 
 // killSession tears s down and unmaps it — never touching a successor that
