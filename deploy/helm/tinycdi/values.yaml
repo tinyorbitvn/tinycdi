@@ -291,6 +291,17 @@ backend:
   # Minimum 1 — the bound cannot be disabled (a runtime without the
   # fd bound tolerates any large value).
   sessionStreamCap: 32
+  # How long an attached desktop session may sit with no request, stream
+  # or file transfer in flight before the gateway releases its connection
+  # lease (-idle-session-release), so a closed tab stops pinning the
+  # workspace: after the last stream of a session closes, a plain reopen
+  # connects without "Take over session" within about this value + 10 s
+  # (up to 30 s more when the closing replica did not own the stream).
+  # A KasmVNC reconnect, the portal's reconnect watch and a rollout drain
+  # all fit inside 60s. "0" (quoted) disables — a session then renews its
+  # lease until the portal session ends; otherwise >= 10s (the renew
+  # interval).
+  idleSessionRelease: 60s
   # AEAD keys sealing the __Host-tcdi_login cookie (D20 — a login started
   # on one replica completes on another). REQUIRED — set existingSecret to
   # a Secret with keys "current" (and optional "previous" during

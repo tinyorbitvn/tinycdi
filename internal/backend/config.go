@@ -192,6 +192,12 @@ type Config struct {
 	// runtime without the fd bound tolerates a large value.
 	SessionStreamCap     int
 	UnattachedSessionTTL time.Duration // ghost-session reap TTL; <=0 uses the gateway default
+	// IdleSessionRelease is how long an attached session may sit with
+	// nothing in flight before the gateway stops serving it and, on the
+	// replica that owns the lease's stream, releases the lease, so a
+	// closed tab stops pinning the workspace; 0 disables. Validated 0 or
+	// >= RenewInterval.
+	IdleSessionRelease time.Duration
 
 	// Internal mTLS listener (the broker/operator surface, ADR 0003).
 	InternalListen   string // empty disables the internal listener
@@ -362,6 +368,8 @@ func ParseFlags(args []string, getenv func(string) string) (Config, error) {
 		"per-workspace bound on live upstream connections through THIS replica — websocket streams and plain proxied requests alike; over the cap the session origin answers 429 too_many_streams + Retry-After: 1. >= 1 — no unlimited mode; pick a large value when the runtime carries no fd bound (env TCDI_SESSION_STREAM_CAP)")
 	fs.DurationVar(&c.UnattachedSessionTTL, "unattached-session-ttl", envDur(getenv, "TCDI_UNATTACHED_SESSION_TTL", gateway.UnattachedSessionTTL),
 		"how long a redeemed session that never served a request may hold its lease before the gateway revokes it — bounds the workspace pin a launch abandoned between redeem and the 303 leaves behind (env TCDI_UNATTACHED_SESSION_TTL)")
+	fs.DurationVar(&c.IdleSessionRelease, "idle-session-release", envDur(getenv, "TCDI_IDLE_SESSION_RELEASE", gateway.DefaultIdleSessionRelease),
+		"how long an attached session may sit with no request, stream or file transfer in flight before the gateway releases its connection lease, so a closed tab stops pinning the workspace; 0 disables, otherwise >= -renew-interval (env TCDI_IDLE_SESSION_RELEASE)")
 
 	// Internal mTLS listener.
 	fs.StringVar(&c.InternalListen, "internal-listen", envOr(getenv, "TCDI_INTERNAL_LISTEN", ":9443"),
@@ -475,6 +483,10 @@ func (c *Config) validate() error {
 	}
 	if c.SessionStreamCap < 1 {
 		return errors.New("-session-stream-cap must be >= 1 — the per-workspace upstream bound cannot be disabled (set a large value instead)")
+	}
+	if c.IdleSessionRelease < 0 || (c.IdleSessionRelease > 0 && c.IdleSessionRelease < c.RenewInterval) {
+		return fmt.Errorf("-idle-session-release must be 0 (disabled) or >= -renew-interval (%s), got %s",
+			c.RenewInterval, c.IdleSessionRelease)
 	}
 	if c.TerminalRetentionDays < 0 {
 		return errors.New("-terminal-retention-days must be >= 0 (0 disables the retention sweep)")

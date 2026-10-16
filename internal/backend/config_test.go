@@ -279,6 +279,43 @@ func TestParseFlags_SessionStreamCap(t *testing.T) {
 	}
 }
 
+// TestParseFlags_IdleSessionRelease: the idle lease release defaults to
+// 60 s, honors TCDI_IDLE_SESSION_RELEASE with the flag winning, accepts 0
+// (disabled), and refuses a negative value or one below -renew-interval.
+func TestParseFlags_IdleSessionRelease(t *testing.T) {
+	cfg, err := ParseFlags(mergedArgs(), noEnv)
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if cfg.IdleSessionRelease != 60*time.Second {
+		t.Fatalf("default IdleSessionRelease = %v, want 60s", cfg.IdleSessionRelease)
+	}
+	cfg, err = ParseFlags(mergedArgs(), envMap(map[string]string{"TCDI_IDLE_SESSION_RELEASE": "2m"}))
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if cfg.IdleSessionRelease != 2*time.Minute {
+		t.Fatalf("env IdleSessionRelease = %v, want 2m", cfg.IdleSessionRelease)
+	}
+	cfg, err = ParseFlags(withArg(mergedArgs(), "-idle-session-release", "0"),
+		envMap(map[string]string{"TCDI_IDLE_SESSION_RELEASE": "2m"}))
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if cfg.IdleSessionRelease != 0 {
+		t.Fatalf("flag IdleSessionRelease = %v, want 0 (flag wins, 0 disables)", cfg.IdleSessionRelease)
+	}
+	if _, err := ParseFlags(withArg(withArg(mergedArgs(), "-renew-interval", "500ms"),
+		"-idle-session-release", "2s"), noEnv); err != nil {
+		t.Fatalf("2s with a 500ms renew interval must parse: %v", err)
+	}
+	for _, bad := range []string{"-1s", "5s", "9s"} { // negative, or below the 10 s default renew interval
+		if _, err := ParseFlags(withArg(mergedArgs(), "-idle-session-release", bad), noEnv); err == nil {
+			t.Fatalf("-idle-session-release %s must fail", bad)
+		}
+	}
+}
+
 func TestParseFlags_SplitModeRejectsMixed(t *testing.T) {
 	// -broker-url together with the default (non-empty) -listen must fail,
 	// and the error must name both flags so the operator can fix the config.
