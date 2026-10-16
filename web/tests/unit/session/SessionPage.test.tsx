@@ -126,7 +126,13 @@ describe("SessionPage", () => {
       </ApiProvider>,
     );
 
-    await screen.findByRole("alertdialog");
+    const dialog = await screen.findByRole("alertdialog");
+    // A recently closed tab still holds the lease for a minute or two:
+    // the body says so, and that waiting is an option besides takeover.
+    expect(dialog).toHaveTextContent(
+      "a tab you closed in the last couple of minutes is still releasing it",
+    );
+    expect(dialog).toHaveTextContent("Wait a minute and try again");
     expect(submitted).toHaveLength(0);
     fireEvent.click(screen.getByRole("button", { name: "Take over session" }));
     await waitFor(() => expect(submitted).toHaveLength(1));

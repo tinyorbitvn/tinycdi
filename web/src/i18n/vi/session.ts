@@ -40,7 +40,7 @@ export default {
 
   "session.inUse.title": "Workspace này đang mở ở nơi khác",
   "session.inUse.body":
-    "Một phiên khác đang kết nối tới workspace này. Tiếp quản sẽ ngắt kết nối của phiên đó.",
+    "Workspace này đang mở ở tab hoặc thiết bị khác, hoặc một tab bạn vừa đóng trong vài phút qua vẫn đang giải phóng nó. Chờ khoảng một phút rồi thử lại, hoặc tiếp quản — tiếp quản sẽ ngắt kết nối phiên kia.",
   "session.inUse.takeover": "Tiếp quản phiên",
 
   "session.elsewhere.title": "Phiên này đang mở ở tab khác",

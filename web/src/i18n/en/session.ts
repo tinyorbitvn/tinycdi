@@ -39,7 +39,7 @@ export default {
 
   "session.inUse.title": "This workspace is open somewhere else",
   "session.inUse.body":
-    "Another session is connected to this workspace. Taking over disconnects it.",
+    "This workspace is open in another tab or device, or a tab you closed in the last couple of minutes is still releasing it. Wait a minute and try again, or take over — taking over disconnects the other session.",
   "session.inUse.takeover": "Take over session",
 
   "session.elsewhere.title": "This session is open in another tab",

@@ -55,6 +55,12 @@ describe("vi catalog", () => {
     }
   });
 
+  // The in-use dialog covers the closed-tab release window, like en.
+  it("in-use body tells the user a closed tab may still hold the workspace", () => {
+    expect(vi["session.inUse.body"]).toContain("một tab bạn vừa đóng");
+    expect(vi["session.inUse.body"]).toContain("Chờ khoảng một phút");
+  });
+
   // A hint that explains option values must name them by the labels the
   // vi select actually shows, not the English enum names.
   it("session-policy clipboard hint names the vi option labels", () => {
