@@ -292,11 +292,16 @@ for `-idle-session-release` (chart value `backend.idleSessionRelease`,
 default `60s`):
 
 - the backend replica that served the last stream ends the lease at the
-  broker on its next renew tick, so a plain reopen works after about
-  **70 s** (the window plus the 10 s renew interval);
+  broker on its next renew tick;
 - when that replica cannot (it restarted, or another replica took the
   stream over), every replica stops renewing and the lease expires at
-  its 30 s TTL — at most **100 s** after the close.
+  its 30 s TTL.
+
+With the default 60 s, the lease is released at most **~70 s** after the
+last stream closes when the replica that served the stream owns it, and
+at most **~100 s** in every other case (in general: the window + the
+10 s renew interval, + the 30 s lease TTL). A file transfer still
+running on any replica keeps the lease.
 
 A reopen inside that window still shows the dialog; waiting a minute or
 taking over both work. A KasmVNC reconnect, the portal's reconnect watch
