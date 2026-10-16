@@ -342,6 +342,14 @@ func (b *Broker) RevokeLeaseChanged(ctx context.Context, leaseID string) (bool, 
 // moves to 'revoked' (the RevokeLeaseChanged state) and the generation's
 // stream accounting closes in the same transaction; a ClaimStream that
 // lost the race then finds no active row and answers ErrRevoked.
+//
+// A file transfer counts as busy only on the replica that serves it, so the
+// release also refuses while the workspace has a live transfer claim (the
+// predicate ClaimTransfer uses). It takes ClaimTransfer's workspace row
+// lock first, then the lease row lock (see lockWorkspaceTx for why that
+// order cannot deadlock): a transfer claim either committed before the
+// release looked — refused — or re-reads the lease after it and finds it
+// revoked.
 func (b *Broker) ReleaseIdleLease(ctx context.Context, gw GatewayIdentity, leaseID string, fence Fence, epoch uint64) (bool, error) {
 	now := b.now()
 	released := false
@@ -349,8 +357,21 @@ func (b *Broker) ReleaseIdleLease(ctx context.Context, gw GatewayIdentity, lease
 		var (
 			l     Lease
 			state string
+			wsUID string
 		)
-		err := tx.QueryRow(ctx, `
+		// A lease's workspace never changes, so an unlocked read names the
+		// workspace row to lock before the lease row.
+		err := tx.QueryRow(ctx, `SELECT workspace_id FROM connection_lease WHERE id = $1`, leaseID).Scan(&wsUID)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			return nil // unknown lease: nothing to release
+		case err != nil:
+			return fmt.Errorf("broker: release lease workspace: %w", err)
+		}
+		if err := lockWorkspaceTx(ctx, tx, wsUID); err != nil {
+			return err
+		}
+		err = tx.QueryRow(ctx, `
 			SELECT workspace_id, gateway_id, state, expires_at, runtime_generation,
 				runtime_uid, fencing_version, stream_epoch
 			FROM connection_lease WHERE id = $1 FOR UPDATE`, leaseID).
@@ -381,6 +402,11 @@ func (b *Broker) ReleaseIdleLease(ctx context.Context, gw GatewayIdentity, lease
 		case err != nil:
 			return fmt.Errorf("broker: release stream count: %w", err)
 		case open > 0:
+			return nil
+		}
+		if live, err := liveTransfersTx(ctx, tx, l.WorkspaceUID, now); err != nil {
+			return err
+		} else if live > 0 {
 			return nil
 		}
 		if _, err := tx.Exec(ctx, `
