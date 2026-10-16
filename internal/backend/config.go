@@ -196,7 +196,8 @@ type Config struct {
 	// nothing in flight before the gateway stops serving it and, on the
 	// replica that owns the lease's stream, releases the lease, so a
 	// closed tab stops pinning the workspace; 0 disables. Validated 0 or
-	// >= RenewInterval.
+	// >= the effective RenewInterval (gateway.LeaseRenewInterval when
+	// RenewInterval <= 0).
 	IdleSessionRelease time.Duration
 
 	// Internal mTLS listener (the broker/operator surface, ADR 0003).
@@ -484,9 +485,15 @@ func (c *Config) validate() error {
 	if c.SessionStreamCap < 1 {
 		return errors.New("-session-stream-cap must be >= 1 — the per-workspace upstream bound cannot be disabled (set a large value instead)")
 	}
-	if c.IdleSessionRelease < 0 || (c.IdleSessionRelease > 0 && c.IdleSessionRelease < c.RenewInterval) {
-		return fmt.Errorf("-idle-session-release must be 0 (disabled) or >= -renew-interval (%s), got %s",
-			c.RenewInterval, c.IdleSessionRelease)
+	// The gateway renews at gateway.LeaseRenewInterval when -renew-interval
+	// is <= 0, so the bound is the interval it actually runs.
+	renew := c.RenewInterval
+	if renew <= 0 {
+		renew = gateway.LeaseRenewInterval
+	}
+	if c.IdleSessionRelease < 0 || (c.IdleSessionRelease > 0 && c.IdleSessionRelease < renew) {
+		return fmt.Errorf("-idle-session-release must be 0 (disabled) or >= the effective -renew-interval (%s), got %s",
+			renew, c.IdleSessionRelease)
 	}
 	if c.TerminalRetentionDays < 0 {
 		return errors.New("-terminal-retention-days must be >= 0 (0 disables the retention sweep)")

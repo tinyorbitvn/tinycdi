@@ -314,6 +314,20 @@ func TestParseFlags_IdleSessionRelease(t *testing.T) {
 			t.Fatalf("-idle-session-release %s must fail", bad)
 		}
 	}
+	// -renew-interval <= 0 makes the gateway fall back to its 10 s
+	// default; the bound follows that effective interval, not the raw 0.
+	for _, renew := range []string{"0", "-1s"} {
+		args := withArg(mergedArgs(), "-renew-interval", renew)
+		if _, err := ParseFlags(withArg(args, "-idle-session-release", "5s"), noEnv); err == nil {
+			t.Fatalf("-idle-session-release 5s with -renew-interval %s (effective 10s) must fail", renew)
+		}
+		if _, err := ParseFlags(withArg(args, "-idle-session-release", "10s"), noEnv); err != nil {
+			t.Fatalf("-idle-session-release 10s with -renew-interval %s must parse: %v", renew, err)
+		}
+		if _, err := ParseFlags(withArg(args, "-idle-session-release", "0"), noEnv); err != nil {
+			t.Fatalf("-idle-session-release 0 with -renew-interval %s must parse: %v", renew, err)
+		}
+	}
 }
 
 func TestParseFlags_SplitModeRejectsMixed(t *testing.T) {
