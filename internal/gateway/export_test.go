@@ -56,3 +56,12 @@ func (g *Gateway) SessionBusy(wsUID string) (busy, ok bool) {
 	defer s.mu.Unlock()
 	return s.busyLocked(), true
 }
+
+// SetKillDecisionHook installs a hook the renew loop runs after an idle
+// release or ghost reap decided to kill a session (s.mu already dropped)
+// and before killSession runs — the gap a request can race into.
+func (g *Gateway) SetKillDecisionHook(h func(reason string)) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.killDecisionHook = h
+}

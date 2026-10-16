@@ -569,3 +569,79 @@ func TestIdleRelease_AttachReleaseRaceConsistency(t *testing.T) {
 	}
 	t.Logf("request-won=%d release-won=%d", won, released)
 }
+
+// TestIdleRelease_DecidedSessionRefusesAdmission: once the idle release or
+// the ghost reap decided to kill a session, a request reaching it before
+// killSession runs is refused — an upgrade must not admit (and claim the
+// lease's stream epoch) on a session already committed to die.
+func TestIdleRelease_DecidedSessionRefusesAdmission(t *testing.T) {
+	t.Run("idle release", func(t *testing.T) {
+		fb := newFakeBroker(t)
+		fb.scriptTicket("tk-gap", testWSUID)
+		// A refused release leaves the lease alive at the broker, so only
+		// the session's own refusal can stop a claim in the gap.
+		fb.releaseRefuse = true
+		clock := &fakeClock{now: time.Now()}
+		gw, srv, _ := newIdleReplica(t, fb, "gw-A", clock)
+		cookie := launchOK(t, srv, testHost, "tk-gap")
+		lease := fb.leaseOf(t, "tk-gap")
+		up := streamOn(t, srv, testHost, cookie)
+		up.Body.Close()
+		waitQuiet(t, gw, testWSUID)
+
+		entered, gate := make(chan string, 1), make(chan struct{})
+		gw.SetKillDecisionHook(func(reason string) { entered <- reason; <-gate })
+		defer close(gate)
+		clock.Advance(idleG + time.Second)
+		select {
+		case r := <-entered:
+			if r != "idle_released" {
+				t.Fatalf("kill decision %q, want idle_released", r)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("no idle decision within 5s")
+		}
+		resp := upgrade(t, srv, testHost, "/websockify", cookie, map[string]string{"Origin": "https://" + testHost})
+		if resp.StatusCode == http.StatusSwitchingProtocols {
+			resp.Body.Close() // a hijacked stream never ends on its own
+			t.Fatal("upgrade admitted on a session decided dead")
+		}
+		drain(resp)
+		if got := fb.epochOf(lease.ID); got != 1 {
+			t.Fatalf("stream epoch = %d after the decision, want 1 (no claim)", got)
+		}
+		if code, _ := raceRequest(t, srv.URL, testHost, cookie); code != http.StatusUnauthorized {
+			t.Fatalf("request on a session decided dead = %d, want 401", code)
+		}
+	})
+	t.Run("ghost reap", func(t *testing.T) {
+		fb := newFakeBroker(t)
+		fb.scriptTicket("tk-ghost-gap", testWSUID)
+		fb.revokeErr = errors.New("broker down") // the lease stays alive at the broker
+		clock := &fakeClock{now: time.Now()}
+		gw, srv, _ := newIdleReplica(t, fb, "gw-A", clock)
+		cookie := launchOK(t, srv, testHost, "tk-ghost-gap")
+		lease := fb.leaseOf(t, "tk-ghost-gap")
+
+		entered, gate := make(chan string, 1), make(chan struct{})
+		gw.SetKillDecisionHook(func(reason string) { entered <- reason; <-gate })
+		defer close(gate)
+		clock.Advance(2 * time.Minute)
+		select {
+		case r := <-entered:
+			if r != "unattached_expired" {
+				t.Fatalf("kill decision %q, want unattached_expired", r)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("no reap decision within 5s")
+		}
+		// The failed revoke left the lease alive at the broker, so only the
+		// session's own refusal can stop the request.
+		fb.mu.Lock()
+		delete(fb.renewErr, lease.ID)
+		fb.mu.Unlock()
+		if code, _ := raceRequest(t, srv.URL, testHost, cookie); code != http.StatusUnauthorized {
+			t.Fatalf("request on a session decided dead = %d, want 401", code)
+		}
+	})
+}

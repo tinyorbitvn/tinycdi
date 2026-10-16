@@ -117,6 +117,12 @@ type session struct {
 	// this replica own the lease's current stream and may ask the broker
 	// to release the lease.
 	ownEpoch uint64
+	// dying is set under mu when the idle release or the ghost reap
+	// decides to kill the session. The decision drops mu before
+	// killSession closes done, so admission (track, addConn,
+	// admitUpgrade) refuses on dying as on dead: nothing may attach, and
+	// no upgrade may claim the stream epoch, in that gap.
+	dying bool
 }
 
 // sessionMints counts newSession calls. A test cannot intercept a
@@ -219,6 +225,13 @@ func (s *session) live(g *Gateway) bool {
 	return !s.deadLocked() && g.now().Sub(s.lastRenewOK) <= g.cfg.RevokeDeadline
 }
 
+// refusingLocked reports whether admission must refuse: the session is
+// dead, or a kill decision is committed and killSession has yet to run.
+// Caller holds s.mu.
+func (s *session) refusingLocked() bool {
+	return s.dying || s.deadLocked()
+}
+
 // deadLocked reports terminal state. Channel-based, so it is safe with or
 // without s.mu held.
 func (s *session) deadLocked() bool {
@@ -254,7 +267,7 @@ func (s *session) track(ctx context.Context) (context.Context, int, bool) {
 	cctx, cancel := context.WithCancel(ctx)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.deadLocked() {
+	if s.refusingLocked() {
 		cancel()
 		return cctx, -1, false
 	}
@@ -282,7 +295,7 @@ func (s *session) untrack(id int, conn net.Conn, now time.Time) {
 func (s *session) addConn(c net.Conn) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.deadLocked() {
+	if s.refusingLocked() {
 		c.Close()
 		return false
 	}
@@ -299,7 +312,7 @@ func (s *session) addConn(c net.Conn) bool {
 func (s *session) admitUpgrade() (int, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.deadLocked() {
+	if s.refusingLocked() {
 		return -1, false
 	}
 	if s.upgradeInFlight {
@@ -644,19 +657,24 @@ func (g *Gateway) renewLoop(s *session) {
 		// never silently by the renew deadline. A session that admitted
 		// a request is attached forever and the reap decision refuses.
 		if s.pastUnattachedTTL(g) && g.reapUnattached(s) {
+			g.afterKillDecision("unattached_expired")
 			g.killSession(s, "unattached_expired")
 			return
 		}
 		// Idle release: an attached session with nothing in flight for
 		// IdleSessionRelease stops being served here. The decision and
 		// the broker call share s.mu exactly like the ghost reap, so a
-		// request that attaches first aborts the release and one that
-		// comes after finds a dying session.
+		// request that attaches first aborts the release. The decision
+		// marks the session dying before it drops s.mu, so a request
+		// that comes after — even before killSession below closes it —
+		// is refused by track, addConn and admitUpgrade, and no upgrade
+		// can claim the stream epoch.
 		if g.cfg.IdleSessionRelease > 0 {
 			if result, ok := g.releaseIdle(s); ok {
 				if g.cfg.Metrics != nil {
 					g.cfg.Metrics.IncIdleRelease(result)
 				}
+				g.afterKillDecision("idle_released")
 				g.killSession(s, "idle_released")
 				return
 			}
@@ -690,6 +708,16 @@ func (g *Gateway) renewLoop(s *session) {
 	}
 }
 
+// afterKillDecision runs the test-only kill-decision hook, if any.
+func (g *Gateway) afterKillDecision(reason string) {
+	g.mu.Lock()
+	h := g.killDecisionHook
+	g.mu.Unlock()
+	if h != nil {
+		h(reason)
+	}
+}
+
 // reapUnattached is the ghost reap's atomic decision, run under s.mu: if a
 // request already attached — or the lease's stream epoch is nonzero — the
 // reap refuses (returns false) and the renew loop carries on. Otherwise the
@@ -703,7 +731,8 @@ func (g *Gateway) renewLoop(s *session) {
 // attach can only commit by taking s.mu, so it either lands before the
 // decision (the reap aborts and the session survives) or after it (the
 // request is attaching to a session already committed to die and loses —
-// its track() refuses once killSession runs). There is no ordering where
+// the decision marks it dying, so track() refuses even before killSession
+// runs). There is no ordering where
 // an attach that already won still gets revoked. The epoch check serializes
 // the same way: a claim from ANY replica bumps it through this replica's
 // renews, so a nonzero epoch proves the lease is in use elsewhere and the
@@ -713,9 +742,10 @@ func (g *Gateway) renewLoop(s *session) {
 func (g *Gateway) reapUnattached(s *session) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.attached || s.deadLocked() {
+	if s.attached || s.refusingLocked() {
 		return false
 	}
+	s.dying = true
 	if s.streamEpoch == 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		err := g.cfg.Broker.RevokeLease(ctx, s.lease.ID)
@@ -750,10 +780,11 @@ const (
 func (g *Gateway) releaseIdle(s *session) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.attached || s.deadLocked() || s.busyLocked() ||
+	if !s.attached || s.refusingLocked() || s.busyLocked() ||
 		g.now().Sub(s.lastActive) < g.cfg.IdleSessionRelease {
 		return "", false
 	}
+	s.dying = true
 	if g.cfg.Sessions == nil || s.ownEpoch == 0 || s.ownEpoch != s.streamEpoch {
 		return idleLapsed, true
 	}

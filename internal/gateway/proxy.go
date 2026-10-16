@@ -264,6 +264,9 @@ type Gateway struct {
 	// channel — test instrumentation that makes the dedup rendezvous
 	// observable (read through export_test.go).
 	inflightWaiters int
+	// killDecisionHook, test-only (export_test.go, under mu), runs between
+	// an idle-release or ghost-reap decision and its killSession.
+	killDecisionHook func(reason string)
 	// upstreamSlots counts in-flight upstream-bound requests per
 	// workspace UID — the runtime pod they all land on — bounded per
 	// workspace by cfg.UpstreamStreamCap (V11). upstreamInFlight is the
