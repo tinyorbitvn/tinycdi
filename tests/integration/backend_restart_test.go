@@ -1352,7 +1352,8 @@ func hardKillExpiry(t *testing.T) {
 // a stream that no longer exists.
 func hardKillReconnectWithinTTL(t *testing.T) {
 	f := newRestartFixture(t)
-	a := f.startReplicaWith(t, "a", "-renew-interval", "1h", "-revoke-deadline", "2h")
+	// -idle-session-release 0: the 1h renew interval is above the 60s default window, which validation rejects.
+	a := f.startReplicaWith(t, "a", "-renew-interval", "1h", "-revoke-deadline", "2h", "-idle-session-release", "0")
 	defer a.cleanup(t)
 	b := f.startReplica(t, "b")
 	defer b.cleanup(t)
