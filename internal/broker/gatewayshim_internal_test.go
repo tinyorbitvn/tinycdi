@@ -70,6 +70,12 @@ func (r *recordingSurface) ClaimStream(_ context.Context, gw GatewayIdentity, _ 
 	return 1, r.err
 }
 
+func (r *recordingSurface) ReleaseIdleLease(_ context.Context, gw GatewayIdentity, _ string, _ Fence, _ uint64) (bool, error) {
+	r.gotIDs = append(r.gotIDs, gw)
+	r.calls = append(r.calls, "release")
+	return true, r.err
+}
+
 func (r *recordingSurface) ClaimTransfer(_ context.Context, gw GatewayIdentity, _, _, _ string) (TransferGrant, error) {
 	r.gotIDs = append(r.gotIDs, gw)
 	r.calls = append(r.calls, "transfer-claim")
@@ -116,7 +122,8 @@ func TestLocalGateway_PinsIdentity(t *testing.T) {
 	_ = lg.BindSession(ctx, spoof, "lease-1", SessionDigest{})
 	_, _ = lg.LeaseBySession(ctx, spoof, SessionDigest{})
 	_, _ = lg.ClaimStream(ctx, spoof, "lease-1", Fence{}, "")
-	if len(rs.gotIDs) != 7 {
+	_, _ = lg.ReleaseIdleLease(ctx, spoof, "lease-1", Fence{}, 1)
+	if len(rs.gotIDs) != 8 {
 		t.Fatalf("calls=%v", rs.calls)
 	}
 	for i, id := range rs.gotIDs {
@@ -178,6 +185,9 @@ func TestLocalGateway_RejectsBadLeaseIDs(t *testing.T) {
 		}
 		if _, err := lg.ClaimStream(ctx, pinned, id, Fence{}, ""); !errors.Is(err, ErrLeaseInvalid) {
 			t.Errorf("claim %q err=%v", id, err)
+		}
+		if _, err := lg.ReleaseIdleLease(ctx, pinned, id, Fence{}, 1); !errors.Is(err, ErrLeaseInvalid) {
+			t.Errorf("release %q err=%v", id, err)
 		}
 	}
 	if _, err := lg.RedeemTicket(ctx, pinned, ""); !errors.Is(err, ErrTicketInvalid) {

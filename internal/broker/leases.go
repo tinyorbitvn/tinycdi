@@ -328,3 +328,71 @@ func (b *Broker) RevokeLeaseChanged(ctx context.Context, leaseID string) (bool, 
 	})
 	return changed && err == nil, err
 }
+
+// ReleaseIdleLease ends a lease whose last stream closed, on behalf of the
+// gateway replica that claimed the lease's current stream epoch. It is
+// conditional and runs under the lease row lock that ClaimStream's epoch
+// bump and every activity write also take, so a release and a claim
+// serialize: the release proceeds only while the lease is active and
+// unexpired, held by gw, matches fence, still carries stream_epoch ==
+// epoch (no replica claimed a stream since) and its runtime generation
+// counts no open stream. Any mismatch is a refusal (false, nil), never an
+// error — the gateway then stops renewing and the lease lapses at its TTL
+// unless a replica still serving a stream renews it. On success the lease
+// moves to 'revoked' (the RevokeLeaseChanged state) and the generation's
+// stream accounting closes in the same transaction; a ClaimStream that
+// lost the race then finds no active row and answers ErrRevoked.
+func (b *Broker) ReleaseIdleLease(ctx context.Context, gw GatewayIdentity, leaseID string, fence Fence, epoch uint64) (bool, error) {
+	now := b.now()
+	released := false
+	err := b.db.WithTx(ctx, func(tx store.Tx) error {
+		var (
+			l     Lease
+			state string
+		)
+		err := tx.QueryRow(ctx, `
+			SELECT workspace_id, gateway_id, state, expires_at, runtime_generation,
+				runtime_uid, fencing_version, stream_epoch
+			FROM connection_lease WHERE id = $1 FOR UPDATE`, leaseID).
+			Scan(&l.WorkspaceUID, &l.GatewayID, &state, &l.ExpiresAt, &l.RuntimeGeneration,
+				&l.RuntimeUID, &l.FencingVersion, &l.StreamEpoch)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			return nil // unknown lease: nothing to release
+		case err != nil:
+			return fmt.Errorf("broker: release lease lock: %w", err)
+		}
+		if state != "active" || !l.ExpiresAt.After(now) || l.GatewayID != gw.ID ||
+			fence.WorkspaceUID != l.WorkspaceUID ||
+			fence.RuntimeGeneration != l.RuntimeGeneration ||
+			fence.RuntimeUID != l.RuntimeUID ||
+			fence.FencingVersion != l.FencingVersion ||
+			epoch == 0 || l.StreamEpoch != epoch {
+			return nil
+		}
+		var open int
+		err = tx.QueryRow(ctx, `
+			SELECT open_streams FROM workspace_activity
+			WHERE workspace_id = $1 AND runtime_generation = $2`,
+			l.WorkspaceUID, int64(l.RuntimeGeneration)).Scan(&open)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			// No activity row: no stream was ever counted open.
+		case err != nil:
+			return fmt.Errorf("broker: release stream count: %w", err)
+		case open > 0:
+			return nil
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE connection_lease SET state = 'revoked', closed_at = $2
+			WHERE id = $1 AND state = 'active'`, leaseID, now); err != nil {
+			return fmt.Errorf("broker: release lease: %w", err)
+		}
+		if err := closeStreamsTx(ctx, tx, l.WorkspaceUID, l.RuntimeGeneration, now); err != nil {
+			return fmt.Errorf("broker: close released streams: %w", err)
+		}
+		released = true
+		return nil
+	})
+	return released && err == nil, err
+}
