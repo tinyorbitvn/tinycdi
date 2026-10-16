@@ -229,6 +229,9 @@ type Broker struct {
 	// transferPolicy re-resolves the file-transfer policy at claim time;
 	// nil refuses every claim (fail closed).
 	transferPolicy TransferPolicyResolver
+	// transferClaimHook, test-only (export_test.go), runs in ClaimTransfer
+	// between the lease read and the claim transaction.
+	transferClaimHook func()
 
 	synthOnce  sync.Once
 	synthCreds *synthesizedCredentials

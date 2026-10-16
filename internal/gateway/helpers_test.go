@@ -94,6 +94,15 @@ type fakeBroker struct {
 	// deterministic rendezvous for the attach-vs-reap race test.
 	revokeGate    chan struct{}
 	revokeEntered chan struct{}
+	// Idle release: releases records each ReleaseIdleLease call;
+	// releaseErr fails every call; releaseRefuse makes the broker keep the
+	// lease; releaseGate/releaseEntered make a call announce itself and
+	// block — the attach-vs-release rendezvous.
+	releases       []idleReleaseCall
+	releaseErr     error
+	releaseRefuse  bool
+	releaseGate    chan struct{}
+	releaseEntered chan struct{}
 
 	// File transfers: transfers maps a transfer id to the grant ClaimTransfer
 	// returns once (single use); claimErr, when set, refuses every claim;
@@ -413,6 +422,63 @@ func (f *fakeBroker) ClaimStream(_ context.Context, _ broker.GatewayIdentity, le
 	f.epochs[leaseID]++
 	f.ownerTabs[leaseID] = ownerTab
 	return f.epochs[leaseID], nil
+}
+
+// idleReleaseCall is one recorded ReleaseIdleLease call.
+type idleReleaseCall struct {
+	leaseID string
+	epoch   uint64
+}
+
+// ReleaseIdleLease mirrors the broker's conditional release: a newer
+// claimed epoch or an already-dead lease is a refusal; success kills the
+// lease the way RevokeLease does (renew/resolve/claim/lookup then answer
+// ErrRevoked).
+func (f *fakeBroker) ReleaseIdleLease(_ context.Context, _ broker.GatewayIdentity, leaseID string, _ broker.Fence, epoch uint64) (bool, error) {
+	f.mu.Lock()
+	f.releases = append(f.releases, idleReleaseCall{leaseID, epoch})
+	gate, entered := f.releaseGate, f.releaseEntered
+	f.mu.Unlock()
+	if entered != nil {
+		entered <- struct{}{}
+	}
+	if gate != nil {
+		<-gate
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.releaseErr != nil {
+		return false, f.releaseErr
+	}
+	if f.releaseRefuse || f.renewErr[leaseID] != nil || epoch != f.epochs[leaseID] {
+		return false, nil
+	}
+	f.renewErr[leaseID] = broker.ErrRevoked
+	return true, nil
+}
+
+// releaseCalls returns the epochs ReleaseIdleLease was called with for
+// leaseID, in order.
+func (f *fakeBroker) releaseCalls(leaseID string) []uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []uint64
+	for _, c := range f.releases {
+		if c.leaseID == leaseID {
+			out = append(out, c.epoch)
+		}
+	}
+	return out
+}
+
+// gateReleases makes every subsequent ReleaseIdleLease call announce
+// itself on entered and block until gate closes.
+func (f *fakeBroker) gateReleases() (entered, gate chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.releaseEntered = make(chan struct{}, 4)
+	f.releaseGate = make(chan struct{})
+	return f.releaseEntered, f.releaseGate
 }
 
 // renewCount reports how many RenewLease calls arrived under gateway ID

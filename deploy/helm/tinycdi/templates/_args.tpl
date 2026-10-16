@@ -79,6 +79,10 @@ Every chart-rendered flag belongs here (TestExtraArgsCannotOverrideRenderedFlags
 # this replica (V11): the runtime's fd-driven crash bound is
 # ~330 conns; the cap converts a storm into a retryable 429.
 - -session-stream-cap={{ .Values.backend.sessionStreamCap | int }}
+# Release the lease of an attached session idle this long (no
+# request, stream or transfer in flight) so a closed tab stops
+# pinning the workspace; 0 disables.
+- -idle-session-release={{ .Values.backend.idleSessionRelease }}
 {{- if .Values.backend.upstreamCA.existingSecret }}
 - -upstream-ca=/etc/upstream-ca/{{ .Values.backend.upstreamCA.key | default "ca.crt" }}
 {{- end }}

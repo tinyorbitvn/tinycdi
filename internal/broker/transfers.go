@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -104,6 +105,9 @@ func (b *Broker) ClaimTransfer(ctx context.Context, gw GatewayIdentity, leaseID,
 	}
 	want := methodDirection(method)
 	iss, sub, _ := strings.Cut(l.PrincipalSubject, "|")
+	if b.transferClaimHook != nil {
+		b.transferClaimHook()
+	}
 	actor := observability.ActorRef(iss, sub)
 
 	var grant TransferGrant
@@ -111,8 +115,23 @@ func (b *Broker) ClaimTransfer(ctx context.Context, gw GatewayIdentity, leaseID,
 	err = b.db.WithTx(ctx, func(tx store.Tx) error {
 		// The first statement: serialize claims per workspace. NO KEY UPDATE
 		// does not block foreign-key lookups on the workspace row.
-		if _, err := tx.Exec(ctx, `SELECT 1 FROM workspaces WHERE id = $1 FOR NO KEY UPDATE`, l.WorkspaceUID); err != nil {
-			return fmt.Errorf("broker: lock workspace %w", err)
+		if err := lockWorkspaceTx(ctx, tx, l.WorkspaceUID); err != nil {
+			return err
+		}
+		// The lease was read live before the lock; ReleaseIdleLease ends a
+		// lease under this same lock, so re-read it here (no lock of its
+		// own: lease-before-workspace would invert the order) — a release
+		// that committed in the gap leaves no transfer to start.
+		var (
+			leaseState string
+			leaseExp   time.Time
+		)
+		if err := tx.QueryRow(ctx, `SELECT state, expires_at FROM connection_lease WHERE id = $1`, l.ID).
+			Scan(&leaseState, &leaseExp); err != nil {
+			return fmt.Errorf("broker: recheck lease %w", err)
+		}
+		if leaseState != "active" || !leaseExp.After(now) {
+			return ErrRevoked
 		}
 		var (
 			ws, rowIss, rowSub, rtUID, dir, path string
@@ -152,12 +171,9 @@ func (b *Broker) ClaimTransfer(ctx context.Context, gw GatewayIdentity, leaseID,
 			refusal = ErrTransferInvalid // the audit row commits, the grant stays pending
 			return emit("denied", "INVALID_STATE", "mismatch")
 		}
-		var live int
-		if err := tx.QueryRow(ctx, `
-			SELECT count(*) FROM session_file_transfer
-			WHERE workspace_id = $1 AND status = 'claimed' AND claimed_at > $2`,
-			ws, now.Add(-store.FileTransferClaimDeadAfter)).Scan(&live); err != nil {
-			return fmt.Errorf("broker: live transfers %w", err)
+		live, err := liveTransfersTx(ctx, tx, ws, now)
+		if err != nil {
+			return err
 		}
 		if live > 0 {
 			refusal = ErrTransferBusy
@@ -247,4 +263,35 @@ func (b *Broker) CompleteTransfer(ctx context.Context, gw GatewayIdentity, lease
 		})
 		return err
 	})
+}
+
+// lockWorkspaceTx takes the per-workspace transfer lock: the workspace row
+// FOR NO KEY UPDATE (it does not block foreign-key lookups on the row).
+// ClaimTransfer and ReleaseIdleLease both take it, so a transfer claim and
+// an idle release serialize. Lock order: this workspace lock first, then
+// any connection_lease row lock — the order RestartWorkspace (workspace
+// FOR UPDATE, then the generation's leases) already follows. No path takes
+// a lease row lock and then a lock on the workspace row that conflicts
+// with this one (lease-first paths only take FOR KEY SHARE through their
+// foreign-key checks), so the order cannot deadlock.
+func lockWorkspaceTx(ctx context.Context, tx store.Tx, wsUID string) error {
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM workspaces WHERE id = $1 FOR NO KEY UPDATE`, wsUID); err != nil {
+		return fmt.Errorf("broker: lock workspace %w", err)
+	}
+	return nil
+}
+
+// liveTransfersTx counts the workspace's live transfer claims: claimed and
+// not yet past store.FileTransferClaimDeadAfter. The single predicate for
+// "a transfer is running", shared by ClaimTransfer (one at a time) and
+// ReleaseIdleLease (a running transfer keeps the lease).
+func liveTransfersTx(ctx context.Context, tx store.Tx, wsUID string, now time.Time) (int, error) {
+	var live int
+	if err := tx.QueryRow(ctx, `
+		SELECT count(*) FROM session_file_transfer
+		WHERE workspace_id = $1 AND status = 'claimed' AND claimed_at > $2`,
+		wsUID, now.Add(-store.FileTransferClaimDeadAfter)).Scan(&live); err != nil {
+		return 0, fmt.Errorf("broker: live transfers %w", err)
+	}
+	return live, nil
 }

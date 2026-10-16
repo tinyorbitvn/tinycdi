@@ -677,6 +677,7 @@ func (b *Backend) newGateway(cfg Config, bc gateway.BrokerClient, id broker.Gate
 		// ever wired unvalidated.
 		UpstreamStreamCap:    cfg.SessionStreamCap,
 		UnattachedSessionTTL: cfg.UnattachedSessionTTL,
+		IdleSessionRelease:   cfg.IdleSessionRelease,
 		TrustedProxies:       trusted,
 		Metrics:              metrics,
 		Audit: observability.NewGuardedSink(observability.NewJSONSink(os.Stdout), b.log,

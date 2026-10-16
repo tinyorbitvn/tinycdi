@@ -313,6 +313,16 @@ Portal web (vitest under `web/tests/unit/`, Playwright under
   serialization (TM-28): an attach concurrent with the reap's
   in-flight revoke loses deterministically; the attach-vs-tick hammer
   asserts no end state ever shows a live session on a revoked lease.
+- `internal/gateway/idle_release_test.go` — idle lease release (TM-28):
+  release past the window with nothing in flight and not before it; a
+  reconnect, an in-flight request or a file transfer keeps the lease; a
+  replica that never claimed or whose stream was fenced only lapses; a
+  broker refusal or error still stops renewing; a refused request
+  restarts the window; 0 disables; the ghost reap is unchanged; an
+  attach concurrent with the release call loses deterministically, a
+  request or upgrade between the release (or ghost reap) decision and the
+  teardown is refused, and the attach-vs-tick hammer never shows a live
+  session on a released lease.
 - `internal/gateway/coop_test.go` — `Cross-Origin-Opener-Policy:
   same-origin` pinned on every session-listener response and
   upstream-supplied COOP stripped (TM-29); frame-ancestors unchanged.
@@ -411,6 +421,14 @@ Portal web (vitest under `web/tests/unit/`, Playwright under
   TTL, single-use, hash storage, audience/tenant/subject binding,
   `ErrConnectionInUse`, clipboard-policy recording
   (`TestTicket_ClipboardPolicyRecordedOnRedeem`, TM-36).
+- `internal/broker/idle_release_test.go` — conditional idle release
+  (TM-28): released only while the stream epoch is unchanged and no
+  stream is counted open; refused for a foreign gateway, a stale fence,
+  a zero or other epoch, an unknown or expired lease; after a release,
+  renew and claim fail and a ticket without takeover is issued; a claim
+  racing the release has exactly one winner; a live file transfer claim
+  refuses the release (a dead or finished one does not), and a transfer
+  claim racing the release has exactly one winner.
 - `internal/broker/leases_test.go`, `connection_state_test.go`,
   `sessions_test.go`, `bindings_envtest_test.go` /
   `bindings_internal_test.go`, `targets_internal_test.go` — lease

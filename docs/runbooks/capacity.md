@@ -280,6 +280,42 @@ What that means for sizing:
 Set the flags through `backend.extraArgs`
 (`deploy/helm/tinycdi/README.md`, "Rate limits and trusted proxies").
 
+## Reopening a workspace after its tab closed
+
+A workspace has at most one live connection lease. While it is live,
+opening the workspace from another tab or device answers
+`409 CONNECTION_IN_USE` and the portal offers "Take over session".
+
+When the last stream of a session closes, the gateway releases the lease
+once the session has had no request, stream or file transfer in flight
+for `-idle-session-release` (chart value `backend.idleSessionRelease`,
+default `60s`):
+
+- the backend replica that served the last stream ends the lease at the
+  broker on its next renew tick;
+- when that replica cannot (it restarted, or another replica took the
+  stream over), every replica stops renewing and the lease expires at
+  its 30 s TTL.
+
+With the default 60 s, the lease is released at most **~70 s** after the
+last stream closes when the replica that served the stream owns it, and
+at most **~100 s** in every other case (in general: the window + the
+10 s renew interval, + the 30 s lease TTL). A file transfer still
+running on any replica keeps the lease.
+
+A reopen inside that window still shows the dialog; waiting a minute or
+taking over both work. A KasmVNC reconnect, the portal's reconnect watch
+and a rollout drain all finish well inside the window and keep the same
+lease. A laptop that sleeps longer than the window loses the lease; on
+wake the portal reconnects with a fresh ticket.
+
+`backend.idleSessionRelease: "0"` turns the release off: an attached
+session then renews its lease until the portal session ends, and only
+"Take over session" reopens the workspace elsewhere. Values below the
+renew interval (`10s`) are refused at startup. Watch
+`tinycdi_gateway_idle_release_total{result}` (see
+[observability.md](observability.md)).
+
 ## What to watch (metrics)
 
 `internal/observability/metrics.go` defines the `tinycdi_*` series
@@ -302,6 +338,7 @@ exposes no metrics endpoint (the chart pins `--metrics-bind-address=0`).
 | Lease health | `tinycdi_lease_failures_total{reason}` | any sustained increase — gateway↔broker or fencing issue |
 | Rehydration | `tinycdi_gateway_rehydrations_total{result}` | `miss`/`error` growth — restarts losing sessions or directory trouble |
 | Stream fencing | `tinycdi_gateway_streams_fenced_total` | spikes — replicas fighting over one lease's stream |
+| Idle lease release | `tinycdi_gateway_idle_release_total{result}` | sustained `error` growth — releases failing, closed tabs pin workspaces up to the lease TTL longer |
 | Session-bound lease kills | `tinycdi_lease_session_missing_total{reason}` | any increase — a sign-out revoke never landed, or a DB restore left leases bound to absent/stale sessions |
 | Logins | `tinycdi_logins_total{outcome}` | `denied`/`error` growth — IdP or gate misconfiguration, brute force |
 | Image age | `tinycdi_runtime_image_age_seconds{family}` | approaches `-image-stale-after` (default 14 d) — publish train overdue |

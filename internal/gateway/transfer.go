@@ -115,6 +115,11 @@ func (g *Gateway) serveTransfer(w http.ResponseWriter, r *http.Request, wsID str
 		return
 	}
 	defer g.releaseUpstreamStream(wsID)
+	// A transfer in flight pins the session against the idle release: a
+	// download keeps running after its tab closed. The closure stamps the
+	// end time when the transfer finishes, after CompleteTransfer.
+	s.beginTransfer()
+	defer func() { s.endTransfer(g.now()) }()
 
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	grant, err := g.cfg.Broker.ClaimTransfer(ctx, g.cfg.Identity, s.leaseID(), transferID, r.Method)

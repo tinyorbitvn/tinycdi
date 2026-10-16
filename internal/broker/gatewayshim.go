@@ -11,8 +11,8 @@ import (
 )
 
 // GatewaySurface is the broker surface a session gateway drives: ticket
-// redemption, lease renew/resolve/revoke, session-digest binding/lookup,
-// stream epochs and activity reports. *Broker implements it; it matches the
+// redemption, lease renew/resolve/revoke/idle release, session-digest
+// binding/lookup, stream epochs and activity reports. *Broker implements it; it matches the
 // session gateway's BrokerClient contract structurally, so the gateway
 // package stays free of a broker-internals dependency and the two halves
 // remain separable.
@@ -26,6 +26,7 @@ type GatewaySurface interface {
 	BindSession(ctx context.Context, gw GatewayIdentity, leaseID string, d SessionDigest) error
 	LeaseBySession(ctx context.Context, gw GatewayIdentity, d SessionDigest) (Lease, error)
 	ClaimStream(ctx context.Context, gw GatewayIdentity, leaseID string, fence Fence, ownerTab string) (uint64, error)
+	ReleaseIdleLease(ctx context.Context, gw GatewayIdentity, leaseID string, fence Fence, epoch uint64) (bool, error)
 	ClaimTransfer(ctx context.Context, gw GatewayIdentity, leaseID, transferID, method string) (TransferGrant, error)
 	CompleteTransfer(ctx context.Context, gw GatewayIdentity, leaseID, transferID string, bytesDone int64, ok bool) error
 }
@@ -152,6 +153,17 @@ func (l *LocalGateway) ClaimStream(ctx context.Context, _ GatewayIdentity, lease
 	}
 	epoch, err := l.b.ClaimStream(ctx, l.id, leaseID, fence, ownerTab)
 	return epoch, classify("claim", err)
+}
+
+// ReleaseIdleLease ends the lease for the pinned identity if it is still
+// idle at the broker (stream epoch unchanged, no open stream); false is a
+// refusal.
+func (l *LocalGateway) ReleaseIdleLease(ctx context.Context, _ GatewayIdentity, leaseID string, fence Fence, epoch uint64) (bool, error) {
+	if !leaseIDOK(leaseID) {
+		return false, ErrLeaseInvalid
+	}
+	released, err := l.b.ReleaseIdleLease(ctx, l.id, leaseID, fence, epoch)
+	return released, classify("release", err)
 }
 
 // ClaimTransfer spends a minted transfer grant for the pinned identity.

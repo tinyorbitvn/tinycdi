@@ -73,6 +73,11 @@ const (
 	// indefinitely. The renew loop reaps it at this TTL. 90 s gives a
 	// slow client ample room to land the first post-303 request.
 	UnattachedSessionTTL = 90 * time.Second
+	// DefaultIdleSessionRelease is the backend's -idle-session-release
+	// default: a KasmVNC reconnect (0.5–2 s), the portal connection
+	// watch's recovery (~53 s) and a rollout drain all fit inside it, so
+	// only a session nobody is coming back to loses its lease.
+	DefaultIdleSessionRelease = 60 * time.Second
 	// SessionLookupRate / SessionLookupBurst are the default per-client
 	// bounds (requests/minute, burst) on session-directory lookups for
 	// cookies this replica has never seen — each miss costs the store
@@ -216,6 +221,16 @@ type Config struct {
 	// renew loop revokes the lease — releasing the workspace pin a live
 	// lease holds — and tears the session down.
 	UnattachedSessionTTL time.Duration
+	// IdleSessionRelease is how long an attached session may sit with no
+	// request, stream, upgrade or file transfer in flight before this
+	// replica stops serving it: the replica that claimed the lease's
+	// current stream epoch asks the session directory to end the lease
+	// (ReleaseIdleLease), any other replica only stops renewing its copy,
+	// so the lease lapses at its TTL unless a replica still serving a
+	// stream renews it. 0 (the zero value) disables — an attached session
+	// renews until its portal session dies; the backend passes
+	// DefaultIdleSessionRelease.
+	IdleSessionRelease time.Duration
 	// Now injects a clock for tests.
 	Now func() time.Time
 	// Metrics, Audit and Logger are optional observability sinks; all three
@@ -249,6 +264,9 @@ type Gateway struct {
 	// channel — test instrumentation that makes the dedup rendezvous
 	// observable (read through export_test.go).
 	inflightWaiters int
+	// killDecisionHook, test-only (export_test.go, under mu), runs between
+	// an idle-release or ghost-reap decision and its killSession.
+	killDecisionHook func(reason string)
 	// upstreamSlots counts in-flight upstream-bound requests per
 	// workspace UID — the runtime pod they all land on — bounded per
 	// workspace by cfg.UpstreamStreamCap (V11). upstreamInFlight is the
@@ -293,6 +311,9 @@ func New(cfg Config) (*Gateway, error) {
 	}
 	if cfg.UnattachedSessionTTL <= 0 {
 		cfg.UnattachedSessionTTL = UnattachedSessionTTL
+	}
+	if cfg.IdleSessionRelease < 0 {
+		cfg.IdleSessionRelease = 0
 	}
 	if cfg.UpstreamStreamCap <= 0 {
 		// Like the store-protection lookup bound, an omitted cap fails
@@ -687,7 +708,7 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 	// bound: a request refused at the cap still carried a valid cookie
 	// here, so a saturated workspace must not ghost-reap a live client
 	// at the unattached TTL while it retries.
-	s.noteAttached()
+	s.noteAttached(g.now())
 	// Per-workspace upstream bound (V11): an admitted request — upgrade
 	// or plain fetch — holds an upstream connection the KasmVNC runtime
 	// spends real fds on, and the workspace's live count is capped per
@@ -750,7 +771,7 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 		// Release only our own reservation: if this stream was fenced by a
 		// newer upgrade, the defer is a no-op and cannot clear the
 		// successor's admission.
-		defer s.endUpgrade(gen)
+		defer func() { s.endUpgrade(gen, g.now()) }()
 		// With a session directory the lease's stream epoch is the
 		// cross-replica fence: claiming it here makes the previous
 		// replica's renew loop drop its copy of this stream (P3). The
@@ -806,7 +827,7 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 			// fences this conn (reload), while a second upgrade during the
 			// handshake itself still gets 409. endUpgrade also runs via the
 			// defer above for upgrades that never reach hijack.
-			s.endUpgrade(gen)
+			s.endUpgrade(gen, g.now())
 		},
 	}
 	ctx, tid, ok := s.track(r.Context())
@@ -826,7 +847,7 @@ func (g *Gateway) serveProxy(w http.ResponseWriter, r *http.Request, wsID string
 			// "no open conns" to mean "disconnect already queued".
 			s.enqueueActivity(broker.ActivityDisconnect, streamEpoch)
 		}
-		s.untrack(tid, captured)
+		s.untrack(tid, captured, g.now())
 	}()
 	g.proxy.ServeHTTP(hw, r.WithContext(context.WithValue(ctx, ctxKeySession, s)))
 }
