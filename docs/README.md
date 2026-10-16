@@ -96,6 +96,8 @@
 
 ## Releases
 
+- [releases/v1.0.2.md](releases/v1.0.2.md) — what 1.0.2 fixes (closing a
+  session tab frees the workspace), how to upgrade from 1.0.1
 - [releases/v1.0.1.md](releases/v1.0.1.md) — what 1.0.1 changes (portal and
   admin console polish), how to upgrade from 1.0.0, known issues
 - [releases/v1.0.0.md](releases/v1.0.0.md) — what 1.0.0 contains, how to
