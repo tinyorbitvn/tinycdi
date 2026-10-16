@@ -142,7 +142,7 @@ export function WorkspaceListPage({ pollIntervalMs }: { pollIntervalMs?: number 
         />
       ) : (
         <>
-          <p className="tc-field__hint">{t("workspaces.list.count", { n: items.length })}</p>
+          <p className="tc-field__hint">{t(items.length === 1 ? "workspaces.list.count.one" : "workspaces.list.count.other", { n: items.length })}</p>
           <Table
             columns={COLUMNS}
             rows={items}
