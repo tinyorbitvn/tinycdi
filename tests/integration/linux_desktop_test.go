@@ -407,7 +407,7 @@ echo stale > .Xauthority`
 // base out of the old linux-desktop image did not grow the browser image:
 // package count, newly-introduced packages and image size stay within 2 % of
 // the baseline recorded in testdata/browser-image-baseline.json — refreshed
-// at the chromium 155.0.8059.39-1~deb12u1 pin.
+// at the chromium 155.0.8059.79-1~deb12u1 pin.
 //
 // When chromium/firefox-esr repins legitimately move these numbers, refresh
 // the baseline in that PR; never to absorb added profile software.

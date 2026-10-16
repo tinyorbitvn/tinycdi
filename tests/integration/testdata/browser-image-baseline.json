@@ -1,5 +1,5 @@
 {
- "_comment": "Baseline refreshed for chromium 155.0.8059.39-1~deb12u1 (Debian security update); the 2 % limit absorbs patch-level growth only.",
+ "_comment": "Baseline refreshed for chromium 155.0.8059.79-1~deb12u1 (Debian security update); the 2 % limit absorbs patch-level growth only.",
  "sizeBytes": 1890040137,
  "packages": [
   "adduser",

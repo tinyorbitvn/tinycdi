@@ -36,8 +36,8 @@ containerd 2.x, Cilium 1.20, and
 - **controller-runtime** — v0.25.x pairs with k8s.io v0.37 (server v1.37.x).
 - **PostgreSQL** — postgres:18.0 digest candidate; any Postgres >= 15 works.
 - **Chromium apt pin** — runtime Dockerfile installs bookworm Chromium;
-  current ARG `155.0.8059.39-1~deb12u1` (latest published in
-  bookworm-security as of 2026-10-13). Repin on each Debian security
+  current ARG `155.0.8059.79-1~deb12u1` (latest published in
+  bookworm-security as of 2026-10-16). Repin on each Debian security
   update — `.github/scripts/check-browser-freshness.sh` (chromium and the
   firefox-esr fallback above) fails the daily runtime-freshness run while
   bookworm-security offers a newer build or the pinned version is gone
