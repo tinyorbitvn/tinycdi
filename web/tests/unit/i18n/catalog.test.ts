@@ -28,13 +28,13 @@ function sourceCorpus(dir: string): string {
 
 describe("i18n catalog", () => {
   it("t: substitutes params", () => {
-    expect(t("workspaces.list.count", { n: 3 })).toBe("3 workspaces");
+    expect(t("workspaces.list.count.other", { n: 3 })).toBe("3 workspaces");
   });
 
   it("t: missing param throws in tests", () => {
-    expect(() => t("workspaces.list.count")).toThrow();
-    expect(() => t("workspaces.list.count", {})).toThrow();
-    expect(() => t("workspaces.list.count", { other: 1 })).toThrow();
+    expect(() => t("workspaces.list.count.other")).toThrow();
+    expect(() => t("workspaces.list.count.other", {})).toThrow();
+    expect(() => t("workspaces.list.count.other", { other: 1 })).toThrow();
   });
 
   it("catalog: no emoji", () => {

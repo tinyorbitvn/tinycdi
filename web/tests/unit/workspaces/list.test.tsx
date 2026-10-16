@@ -127,6 +127,28 @@ describe("WorkspaceListPage", () => {
     expect(within(table).getByText("Retain")).toBeInTheDocument();
   }, 20000);
 
+  it("list: the count line uses the singular for one workspace", async () => {
+    const api = createMockApi();
+    api.state.workspaces.clear();
+    api.state.workspaces.set("ws_one", readyWorkspace({ id: "ws_one", name: "dev-box" }));
+    loginCookies();
+    renderWithApi(<WorkspaceListPage pollIntervalMs={60_000} />, api);
+
+    expect(await screen.findByText("1 workspace")).toBeVisible();
+    expect(screen.queryByText("1 workspaces")).toBeNull();
+  }, 20000);
+
+  it("list: the count line uses the plural for two workspaces", async () => {
+    const api = createMockApi();
+    api.state.workspaces.clear();
+    api.state.workspaces.set("ws_one", readyWorkspace({ id: "ws_one", name: "dev-box" }));
+    api.state.workspaces.set("ws_two", readyWorkspace({ id: "ws_two", name: "build-box" }));
+    loginCookies();
+    renderWithApi(<WorkspaceListPage pollIntervalMs={60_000} />, api);
+
+    expect(await screen.findByText("2 workspaces")).toBeVisible();
+  }, 20000);
+
   it("list: rows stack below md, names keep whole words, Manage is a small secondary button", async () => {
     const api = createMockApi();
     api.state.workspaces.clear();
