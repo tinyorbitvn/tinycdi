@@ -123,4 +123,25 @@ describe("quota: per-user limits", () => {
     await waitFor(() => expect(within(dialog).getByLabelText("Running workspaces")).toHaveValue(6));
     await waitFor(() => expect(defaultLine()).toHaveTextContent("6"));
   });
+
+  it("the default stat shows a dash, not a blank, until the default loads", async () => {
+    const api = setup();
+    const handle = api.handle.bind(api);
+    // The default never loads (unavailable): the stat must not render blank.
+    api.handle = (req) =>
+      req.method === "GET" && req.path === `/v1/admin/tenants/${TENANT}/user-limits/default`
+        ? {
+            status: 503,
+            headers: { "content-type": "application/json" },
+            body: { error: { code: "UNAVAILABLE", message: "down", retryable: true, requestId: "req_ul" } },
+          }
+        : handle(req);
+    renderWithApi(<QuotaPage />, api);
+
+    await screen.findByRole("heading", { name: "Quota" });
+    const stat = await screen.findByRole("group", { name: "Default per-user limit" });
+    expect(stat.querySelector(".tc-stat__value")).toHaveTextContent("\u2014");
+    await screen.findByText("down");
+    expect(stat.querySelector(".tc-stat__value")).toHaveTextContent("\u2014");
+  });
 });
