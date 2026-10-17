@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import {
   Alert,
   Badge,
@@ -156,20 +156,22 @@ export function QuotaEditDialog({
   const [busy, setBusy] = useState(false);
   const [saveError, setSaveError] = useState<unknown>(null);
   const [invalid, setInvalid] = useState(false);
-  // The ETag the dialog's fields were read from — sent as If-Match so a
-  // concurrent write 412s instead of being silently overwritten.
-  const etagRef = useRef(quota.etag);
-
   // The dialog stays mounted while closed, so state must be reset when it
   // reopens or when the quota changed underneath it — otherwise a reopen
-  // shows (and would re-save) stale limits.
-  useEffect(() => {
-    if (!open) return;
-    setFields(fieldsOf(quota));
-    etagRef.current = quota.etag;
-    setInvalid(false);
-    setSaveError(null);
-  }, [open, quota]);
+  // shows (and would re-save) stale limits. The reset runs in the render
+  // that shows the new props: a post-commit effect could land after an
+  // edit made right as a reload painted and silently undo it. While open,
+  // the fields are therefore always read from `quota`, so quota.etag is the
+  // If-Match that makes a concurrent write 412 instead of being overwritten.
+  const [shown, setShown] = useState({ open, quota });
+  if (shown.open !== open || shown.quota !== quota) {
+    setShown({ open, quota });
+    if (open) {
+      setFields(fieldsOf(quota));
+      setInvalid(false);
+      setSaveError(null);
+    }
+  }
 
   function set(k: keyof EditFields) {
     return (e: React.ChangeEvent<HTMLInputElement>) =>
@@ -186,7 +188,7 @@ export function QuotaEditDialog({
     setBusy(true);
     setSaveError(null);
     try {
-      await putAdminQuota(api, quota.tenant, limits, etagRef.current);
+      await putAdminQuota(api, quota.tenant, limits, quota.etag);
       onSaved();
       onClose();
     } catch (e) {
