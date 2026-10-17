@@ -245,9 +245,9 @@ func TestDefaultsRenderWithoutDevComponents(t *testing.T) {
 		t.Fatalf("expected exactly 3 Deployments by default, got %d", len(deps))
 	}
 	for _, want := range []struct{ dep, img string }{
-		{"backend", "ghcr.io/tinyorbitvn/tinycdi-backend:1.0.2"},
-		{"operator", "ghcr.io/tinyorbitvn/tinycdi-operator:1.0.2"},
-		{"frontend", "ghcr.io/tinyorbitvn/tinycdi-frontend:1.0.2"},
+		{"backend", "ghcr.io/tinyorbitvn/tinycdi-backend:1.0.3"},
+		{"operator", "ghcr.io/tinyorbitvn/tinycdi-operator:1.0.3"},
+		{"frontend", "ghcr.io/tinyorbitvn/tinycdi-frontend:1.0.3"},
 	} {
 		d := deployment(docs, want.dep)
 		if d == nil {
@@ -288,8 +288,8 @@ func TestChartVersion1(t *testing.T) {
 	if err := yaml.Unmarshal(data, &ch); err != nil {
 		t.Fatal(err)
 	}
-	if ch.Version != "1.0.2" || ch.AppVersion != "1.0.2" {
-		t.Fatalf("Chart.yaml version=%q appVersion=%q, want 1.0.2/\"1.0.2\"", ch.Version, ch.AppVersion)
+	if ch.Version != "1.0.3" || ch.AppVersion != "1.0.3" {
+		t.Fatalf("Chart.yaml version=%q appVersion=%q, want 1.0.3/\"1.0.3\"", ch.Version, ch.AppVersion)
 	}
 }
 
@@ -400,10 +400,10 @@ func TestImageRegistryOverride(t *testing.T) {
 	for _, name := range []string{"backend", "operator", "frontend"} {
 		depImg[name] = firstContainerImage(deployment(docs, name))
 	}
-	if depImg["backend"] != "registry.example.com/tinyorbitvn/tinycdi-backend:1.0.2" {
+	if depImg["backend"] != "registry.example.com/tinyorbitvn/tinycdi-backend:1.0.3" {
 		t.Errorf("global registry override failed: backend image %q", depImg["backend"])
 	}
-	if depImg["frontend"] != "frontend-mirror.example.net/tinyorbitvn/tinycdi-frontend:1.0.2" {
+	if depImg["frontend"] != "frontend-mirror.example.net/tinyorbitvn/tinycdi-frontend:1.0.3" {
 		t.Errorf("per-image registry must win over global: frontend image %q", depImg["frontend"])
 	}
 }
