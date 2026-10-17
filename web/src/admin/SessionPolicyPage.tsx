@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { Alert, Button, Card, Form, FormActions, Input, Section, Select, Spinner, Stack, Table, useTableSort } from "../design";
 import type { Column } from "../design/Table";
 import { IconRefresh } from "../design/icons";
@@ -130,20 +130,21 @@ export function SessionPolicyContent({
   const [applyOpen, setApplyOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [saveError, setSaveError] = useState<unknown>(null);
-  // The ETag the form's selection was read from — sent as If-Match so a
-  // concurrent write 412s instead of being silently overwritten.
-  const etagRef = useRef(policy.etag);
-
   // The page reloads after every save and on precondition failures: reset
-  // the selection and ETag to what the server just reported. The error
-  // is deliberately NOT cleared here — a 412 needs its "reloaded, review
-  // and retry" guidance to stay visible while the new values land.
-  useEffect(() => {
+  // the selection to what the server just reported, in the same render that
+  // shows the new policy. (A post-commit effect could land after an edit
+  // made right as the reload painted and silently undo it.) The selection
+  // is therefore always read from `policy`, so policy.etag is the If-Match
+  // that makes a concurrent write 412 instead of being overwritten. The
+  // error is deliberately NOT cleared here — a 412 needs its "reloaded,
+  // review and retry" guidance to stay visible while the new values land.
+  const [shown, setShown] = useState(policy);
+  if (shown !== policy) {
+    setShown(policy);
     setCeiling(policy.clipboard);
     setFtMode(policy.fileTransfer.mode);
     setFtMax(mibOf(policy.fileTransfer.maxFileBytes));
-    etagRef.current = policy.etag;
-  }, [policy]);
+  }
 
   async function save() {
     setBusy(true);
@@ -153,7 +154,7 @@ export function SessionPolicyContent({
         api,
         policy.tenant,
         { clipboard: ceiling, fileTransfer: { mode: ftMode, maxFileBytes: ftBytes } },
-        etagRef.current,
+        policy.etag,
       );
       onChanged();
     } catch (e) {

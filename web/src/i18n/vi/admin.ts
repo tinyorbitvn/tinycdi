@@ -131,6 +131,8 @@ export default {
   "admin.userLimits.empty": "Chưa có người dùng nào.",
   "admin.userLimits.default": "Giới hạn mặc định mỗi người dùng",
   "admin.userLimits.unlimited": "Không giới hạn",
+  // Placeholder while the default is loading or could not be read.
+  "admin.userLimits.noValue": "—",
   "admin.userLimits.inherit": "Mặc định",
   "admin.userLimits.column.running": "Đang chạy",
   "admin.userLimits.column.limit": "Ghi đè",

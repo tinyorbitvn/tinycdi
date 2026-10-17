@@ -92,4 +92,36 @@ describe("data purge", () => {
       within(dialog).getByText("20 GiB from old-desktop. Purging destroys the disk permanently. This cannot be undone."),
     ).toBeInTheDocument();
   });
+
+  it("an unmapped error code leads with stable guidance, not the raw server message", async () => {
+    const api = createMockApi();
+    const handle = api.handle.bind(api);
+    api.handle = (req) =>
+      req.path.endsWith(":purge")
+        ? {
+            status: 500,
+            headers: { "content-type": "application/json" },
+            body: { error: { code: "BRAND_NEW_CODE", message: "raw server text", retryable: true, requestId: "req_x" } },
+          }
+        : handle(req);
+    loginCookies();
+    renderWithApi(<DataListPage />, api);
+
+    const dialog = await openPurge();
+    fireEvent.change(within(dialog).getByLabelText(/confirm/i), {
+      target: { value: RETAINED_DISK.id },
+    });
+    const confirm = within(dialog).getByRole("button", { name: /purge permanently/i });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    fireEvent.click(confirm);
+
+    const alert = await within(dialog).findByRole("alert");
+    const title = alert.querySelector(".tc-alert__title");
+    expect(title).toHaveTextContent(
+      "The service could not complete the request; it is safe to retry.",
+    );
+    expect(title).not.toHaveTextContent("raw server text");
+    // The server message stays visible as secondary detail.
+    expect(alert).toHaveTextContent("raw server text");
+  });
 });

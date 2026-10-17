@@ -132,6 +132,8 @@ export default {
   "admin.userLimits.empty": "No users yet.",
   "admin.userLimits.default": "Default per-user limit",
   "admin.userLimits.unlimited": "Unlimited",
+  // Placeholder while the default is loading or could not be read.
+  "admin.userLimits.noValue": "—",
   "admin.userLimits.inherit": "Default",
   "admin.userLimits.column.running": "Running",
   "admin.userLimits.column.limit": "Override",

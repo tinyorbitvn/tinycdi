@@ -254,7 +254,13 @@ export function UserLimitsSection({ tenant }: { tenant: string }) {
       <div className="tc-stat-grid tc-userlimits-default">
         <Stat
           label={t("admin.userLimits.default")}
-          value={def.data ? (def.data.limit == null ? t("admin.userLimits.unlimited") : def.data.limit) : null}
+          value={
+            def.data
+              ? def.data.limit == null
+                ? t("admin.userLimits.unlimited")
+                : def.data.limit
+              : t("admin.userLimits.noValue")
+          }
         />
       </div>
       <ApiErrorAlert error={def.error} onRetry={def.reload} />

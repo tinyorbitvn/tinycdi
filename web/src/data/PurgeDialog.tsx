@@ -3,6 +3,7 @@ import { Alert, Button, Dialog, Input, Stack } from "../design";
 import { useApi } from "../api/context";
 import { isPortalApiError } from "../api/errors";
 import { ErrorMeta } from "../api/ErrorMeta";
+import { apiErrorGuidance } from "../workspaces/ErrorBanner";
 import { t } from "../i18n";
 import {
   getRetainedData,
@@ -110,13 +111,14 @@ export function PurgeDialog({
           <Alert
             tone="danger"
             title={
-              isPortalApiError(error) && error.code === "INVALID_STATE"
-                ? t("data.purge.conflict")
-                : isPortalApiError(error)
-                  ? error.message
-                  : t("data.purge.notFound")
+              isPortalApiError(error)
+                ? error.code === "INVALID_STATE"
+                  ? t("data.purge.conflict")
+                  : apiErrorGuidance(error)
+                : t("data.purge.notFound")
             }
           >
+            {isPortalApiError(error) && error.message ? <p>{error.message}</p> : null}
             <ErrorMeta error={error} />
           </Alert>
         ) : null}

@@ -90,4 +90,34 @@ describe("design/Tabs scroll into view", () => {
       HTMLElement.prototype.scrollIntoView = original;
     }
   });
+
+  it("marks only the edges that hide more tabs, so the edge fade never clips an end tab", () => {
+    render(<Tabs label="sections" tabs={tabs} defaultValue="a" />);
+    const list = screen.getByRole("tablist", { name: "sections" });
+    // jsdom has no layout: model a 300px row holding 500px of tabs.
+    Object.defineProperty(list, "clientWidth", { configurable: true, value: 300 });
+    Object.defineProperty(list, "scrollWidth", { configurable: true, value: 500 });
+
+    Object.defineProperty(list, "scrollLeft", { configurable: true, value: 0 });
+    fireEvent.scroll(list);
+    expect(list).not.toHaveAttribute("data-overflow-start");
+    expect(list).toHaveAttribute("data-overflow-end");
+
+    Object.defineProperty(list, "scrollLeft", { configurable: true, value: 100 });
+    fireEvent.scroll(list);
+    expect(list).toHaveAttribute("data-overflow-start");
+    expect(list).toHaveAttribute("data-overflow-end");
+
+    Object.defineProperty(list, "scrollLeft", { configurable: true, value: 200 });
+    fireEvent.scroll(list);
+    expect(list).toHaveAttribute("data-overflow-start");
+    expect(list).not.toHaveAttribute("data-overflow-end");
+  });
+
+  it("a row that fits marks no overflow edge", () => {
+    render(<Tabs label="sections" tabs={tabs} defaultValue="a" />);
+    const list = screen.getByRole("tablist", { name: "sections" });
+    expect(list).not.toHaveAttribute("data-overflow-start");
+    expect(list).not.toHaveAttribute("data-overflow-end");
+  });
 });

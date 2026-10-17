@@ -33,7 +33,9 @@ const GUIDANCE_KEYS: Record<ErrorCode, MessageKey> = {
   INTERNAL: "errors.code.generic",
 };
 
-function guidance(e: PortalApiError): string {
+// apiErrorGuidance is the user-facing stable-code text; dialogs that render
+// their own Alert lead with it so the server message stays detail only.
+export function apiErrorGuidance(e: PortalApiError): string {
   // A teardown-pending quota refusal resolves on the next recovery pass —
   // distinct copy from a real exhaustion.
   if (isReleasePending(e)) return t("errors.code.quotaReleasePending");
@@ -79,7 +81,7 @@ export function ErrorBanner({
   return (
     <Alert
       tone="danger"
-      title={apiErr ? guidance(apiErr) : t("errors.banner.fallback")}
+      title={apiErr ? apiErrorGuidance(apiErr) : t("errors.banner.fallback")}
       {...(onDismiss ? { onDismiss } : {})}
       {...(canRetry
         ? {

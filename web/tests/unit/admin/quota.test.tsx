@@ -1,8 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { createRoot } from "react-dom/client";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
-import { createMockApi, loginCookies, renderWithApi } from "../helpers";
+import { createMockApi, loginCookies, renderWithApi, stubFetch } from "../helpers";
 import { makeAdmin, seedTenant, control } from "./helpers";
-import { QuotaPage } from "../../../src/admin/QuotaPage";
+import { QuotaEditDialog, QuotaPage } from "../../../src/admin/QuotaPage";
+import type { AdminQuotaView, Tagged } from "../../../src/admin/api";
+import { createApi } from "../../../src/api/client";
+import { ApiProvider } from "../../../src/api/context";
 import { OverviewPage } from "../../../src/admin/OverviewPage";
 import { adminArea } from "../../mock-api/admin.ts";
 import { dataArea } from "../../mock-api/data.ts";
@@ -125,10 +129,13 @@ describe("quota: admin edit", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Save limits" }));
 
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
-    const meter = (
-      await screen.findByText("Running workspaces", { selector: ".tc-meter__label" })
-    ).closest(".tc-meter")!;
-    expect(meter).toHaveTextContent(/of 12/);
+    // The dialog closes as the save's reload starts: the old meter is still
+    // on screen, so wait for the reloaded value rather than reading it once.
+    await waitFor(() =>
+      expect(
+        screen.getByText("Running workspaces", { selector: ".tc-meter__label" }).closest(".tc-meter"),
+      ).toHaveTextContent(/of 12/),
+    );
   });
 
   it("a config-managed tenant shows the platform source and no edit action", async () => {
@@ -194,6 +201,8 @@ describe("quota: optimistic concurrency", () => {
     await waitFor(() =>
       expect(within(dialog).getByLabelText(/Running workspaces/)).toHaveValue(20),
     );
+    // The warning explains why the values changed, so it outlives the reload.
+    expect(within(dialog).getByText(/changed these limits/)).toBeInTheDocument();
 
     // Saving again carries the fresh version and lands.
     fireEvent.click(within(dialog).getByRole("button", { name: "Save limits" }));
@@ -202,5 +211,70 @@ describe("quota: optimistic concurrency", () => {
       await screen.findByText("Running workspaces", { selector: ".tc-meter__label" })
     ).closest(".tc-meter")!;
     expect(meter).toHaveTextContent(/of 20/);
+  });
+});
+
+describe("quota: edit dialog reset", () => {
+  const quotaAt = (running: number, etag: string) =>
+    ({
+      tenant: "acme",
+      source: "api",
+      configured: true,
+      limits: { workspaces: 20, runningWorkspaces: running, cpuMillicores: 8000, memoryMib: 16384, storageGib: 100 },
+      usage: { workspaces: 0, runningWorkspaces: 0, cpuMillicores: 0, memoryMib: 0, storageGib: 0 },
+      etag,
+    }) as unknown as Tagged<AdminQuotaView>;
+
+  // A reload that lands while the dialog is open resets the fields. An
+  // edit made right after that reload paints must survive: the reset may
+  // not run late (after the commit, as a passive effect) and undo it.
+  // Rendered outside act() so React schedules work as in a browser; the
+  // edit fires from a MutationObserver as soon as the reload commits.
+  it("an edit made as a reload lands survives the dialog's reset", async () => {
+    const g = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean | undefined };
+    const prevAct = g.IS_REACT_ACT_ENVIRONMENT;
+    g.IS_REACT_ACT_ENVIRONMENT = false;
+    const host = document.body.appendChild(document.createElement("div"));
+    const root = createRoot(host);
+    const client = createApi(stubFetch(createMockApi()));
+    const view = (q: Tagged<AdminQuotaView>) => (
+      <ApiProvider client={client}>
+        <span data-testid="etag">{q.etag}</span>
+        <QuotaEditDialog quota={q} open onClose={() => {}} onSaved={() => {}} />
+      </ApiProvider>
+    );
+    let now: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      root.render(view(quotaAt(8, "q-1")));
+      const input = (await screen.findByLabelText(/Running workspaces/)) as HTMLInputElement;
+      await waitFor(() => expect(input).toHaveValue(8));
+      await new Promise((r) => setTimeout(r, 20));
+
+      const edited = new Promise<void>((resolve) => {
+        const mo = new MutationObserver(() => {
+          if (screen.getByTestId("etag").textContent !== "q-2") return;
+          mo.disconnect();
+          now?.mockRestore();
+          // A user edit, dispatched like the browser does (no act()).
+          Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "12");
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          resolve();
+        });
+        mo.observe(document.body, { subtree: true, childList: true, characterData: true });
+      });
+      // Make the scheduler yield after every task, as it does on a busy
+      // main thread, so post-commit work cannot run before the edit.
+      let t = performance.now();
+      now = vi.spyOn(performance, "now").mockImplementation(() => (t += 10));
+      root.render(view(quotaAt(9, "q-2")));
+      await edited;
+      await new Promise((r) => setTimeout(r, 50));
+      expect(input).toHaveValue(12);
+    } finally {
+      now?.mockRestore();
+      root.unmount();
+      host.remove();
+      g.IS_REACT_ACT_ENVIRONMENT = prevAct;
+    }
   });
 });

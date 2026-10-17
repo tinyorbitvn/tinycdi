@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { Alert, Button, Dialog, Input, Select, Stack } from "../design";
 import { useApi } from "../api/context";
 import { newIdempotencyKey } from "../api/client";
-import { isPortalApiError, isReleasePending } from "../api/errors";
+import { isPortalApiError } from "../api/errors";
 import { ErrorMeta } from "../api/ErrorMeta";
+import { apiErrorGuidance } from "../workspaces/ErrorBanner";
 import { t } from "../i18n";
 import { runtimeLabel } from "../templates/format";
 import { useLoader } from "../app/me";
@@ -135,17 +136,18 @@ export function AttachDialog({
           <Alert
             tone="danger"
             title={
-              isReleasePending(error)
-                ? t("errors.code.quotaReleasePending")
-                : isPortalApiError(error) && error.code === "INVALID_STATE"
+              isPortalApiError(error)
+                ? error.code === "INVALID_STATE"
                   ? t("data.attach.conflict")
-                  : isPortalApiError(error) && error.code === "ALREADY_EXISTS"
-                    ? t("errors.code.alreadyExists")
-                    : error instanceof Error
-                      ? error.message
-                      : String(error)
+                  : apiErrorGuidance(error)
+                : t("errors.banner.fallback")
             }
           >
+            {isPortalApiError(error) ? (
+              error.message ? <p>{error.message}</p> : null
+            ) : (
+              <p>{error instanceof Error ? error.message : String(error)}</p>
+            )}
             <ErrorMeta error={error} />
           </Alert>
         ) : null}

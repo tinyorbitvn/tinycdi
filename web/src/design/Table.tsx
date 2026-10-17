@@ -155,6 +155,10 @@ export function Table<T>({
 
   const isEmpty = !loading && rows.length === 0;
 
+  // Stacked rows restyle table/tr/td as block and grid boxes, which drops
+  // the implicit table semantics in some browsers: restate them as roles.
+  const role = (r: string) => (stackBelow ? { role: r } : {});
+
   return (
     <div className={cx("tc-table-wrap", isEmpty && "tc-table-wrap--empty", className)}>
       <table
@@ -165,10 +169,11 @@ export function Table<T>({
           stackBelow && `tc-table--stack-${stackBelow}`,
         )}
         aria-busy={loading || undefined}
+        {...role("table")}
       >
         <caption className={showCaption ? "tc-table__caption" : "tc-sr-only"}>{caption}</caption>
-        <thead>
-          <tr>
+        <thead {...role("rowgroup")}>
+          <tr {...role("row")}>
             {columns.map((c) => {
               const sorted = sort?.key === c.key ? sort.direction : undefined;
               const ariaSort = c.sortable ? (sorted ?? "none") : c.sort;
@@ -177,6 +182,7 @@ export function Table<T>({
                   key={c.key}
                   scope="col"
                   className={cellClass(c)}
+                  {...role("columnheader")}
                   {...(ariaSort !== undefined ? { "aria-sort": ariaSort } : {})}
                 >
                   {c.sortable ? (
@@ -203,20 +209,20 @@ export function Table<T>({
             })}
           </tr>
         </thead>
-        <tbody>
+        <tbody {...role("rowgroup")}>
           {loading ? (
             Array.from({ length: 3 }, (_, i) => (
-              <tr key={`sk-${i}`} className="tc-table__skeleton-row">
+              <tr key={`sk-${i}`} className="tc-table__skeleton-row" {...role("row")}>
                 {columns.map((c) => (
-                  <td key={c.key} className={cellClass(c)}>
+                  <td key={c.key} className={cellClass(c)} {...role("cell")}>
                     <span className="tc-skeleton tc-skeleton--text tc-w-75" aria-hidden="true" />
                   </td>
                 ))}
               </tr>
             ))
           ) : rows.length === 0 ? (
-            <tr>
-              <td colSpan={columns.length} className="tc-table__empty">
+            <tr className="tc-table__empty-row" {...role("row")}>
+              <td colSpan={columns.length} className="tc-table__empty" {...role("cell")}>
                 {empty === undefined || typeof empty === "string" ? (
                   <p className="tc-table__empty-text">{empty ?? "Nothing to show."}</p>
                 ) : (
@@ -233,6 +239,7 @@ export function Table<T>({
                 <tr
                   key={key}
                   className={cx(onRowClick && "tc-table__row--clickable", selected && "tc-table__row--selected")}
+                  {...role("row")}
                   {...(selected ? { "aria-selected": true } : {})}
                   {...(activate
                     ? {
@@ -254,11 +261,11 @@ export function Table<T>({
                     const stackProps = stackBelow ? { "data-label": labelOf(c) } : {};
                     const body = stackBelow ? <div className="tc-table__value">{content}</div> : content;
                     return c.rowHeader ? (
-                      <th key={c.key} scope="row" className={cellClass(c)} {...stackProps}>
+                      <th key={c.key} scope="row" className={cellClass(c)} {...role("rowheader")} {...stackProps}>
                         {body}
                       </th>
                     ) : (
-                      <td key={c.key} className={cellClass(c)} {...stackProps}>
+                      <td key={c.key} className={cellClass(c)} {...role("cell")} {...stackProps}>
                         {body}
                       </td>
                     );
