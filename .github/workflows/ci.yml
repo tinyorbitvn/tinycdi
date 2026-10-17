@@ -432,7 +432,7 @@ jobs:
         run: .github/scripts/go-fuzz-targets.sh
       - name: upload fuzz crashers
         if: failure() && steps.gate.outputs.run == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: fuzz-crashers
           path: internal/*/testdata/fuzz/
@@ -553,7 +553,7 @@ jobs:
           fi
       - name: upload cold-connect report
         if: always() && steps.gate.outputs.run == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: cold-connect
           path: hack/quickstart/smoke/test-results/cold-connect.json
@@ -579,7 +579,7 @@ jobs:
           done
       - name: upload smoke report
         if: failure() && steps.gate.outputs.run == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: quickstart-smoke
           path: hack/quickstart/smoke/test-results
@@ -702,7 +702,7 @@ jobs:
             hack/quickstart/smoke/test-results/cluster-logs || true
       - name: upload smoke report
         if: failure() && steps.gate.outputs.run == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: partitioned-smoke
           path: hack/quickstart/smoke/test-results
