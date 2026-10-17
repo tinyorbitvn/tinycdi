@@ -215,7 +215,7 @@ export function Table<T>({
               </tr>
             ))
           ) : rows.length === 0 ? (
-            <tr>
+            <tr className="tc-table__empty-row">
               <td colSpan={columns.length} className="tc-table__empty">
                 {empty === undefined || typeof empty === "string" ? (
                   <p className="tc-table__empty-text">{empty ?? "Nothing to show."}</p>

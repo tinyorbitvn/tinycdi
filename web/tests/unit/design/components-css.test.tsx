@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { StatusPill } from "../../../src/design/Badge";
+import { Table } from "../../../src/design/Table";
 import { declarations, mediaBlocks, readWeb, topLevel } from "./css";
 
 const design = () => topLevel(readWeb("src/design/design.css"));
@@ -57,10 +58,30 @@ describe("table polish", () => {
 
   it("tints hovered rows and keeps cell links plain until hover/focus", () => {
     const css = design();
-    expect(declarations(css, ".tc-table tbody tr:hover > *").background).toBe("var(--tc-color-row-hover)");
+    const hover = ".tc-table tbody tr:not(.tc-table__empty-row):not(.tc-table__skeleton-row):hover";
+    expect(declarations(css, `${hover} > *`).background).toBe("var(--tc-color-row-hover)");
+    // Empty-state and skeleton rows never tint.
+    expect(declarations(css, ".tc-table tbody tr:hover > *")).toEqual({});
     expect(declarations(css, ".tc-table a")["text-decoration"]).toBe("none");
     expect(declarations(css, ".tc-table a:hover")["text-decoration"]).toBe("underline");
     expect(declarations(css, ".tc-table a:focus-visible")["text-decoration"]).toBe("underline");
+  });
+
+  it("empty-state and skeleton rows carry the classes the hover rule skips", () => {
+    const cols = [{ key: "id", header: "ID" }];
+    const { container, rerender } = render(
+      <Table caption="rows" columns={cols} rows={[] as { id: string }[]} rowKey={(r) => r.id} />,
+    );
+    expect(container.querySelector("tbody tr")).toHaveClass("tc-table__empty-row");
+    rerender(<Table caption="rows" columns={cols} rows={[] as { id: string }[]} rowKey={(r) => r.id} loading />);
+    for (const tr of container.querySelectorAll("tbody tr")) expect(tr).toHaveClass("tc-table__skeleton-row");
+  });
+
+  it("a stacked row tints as one block, not cell by cell", () => {
+    const narrow = mediaBlocks(readWeb("src/design/design.css"), "(max-width: 47.99rem)").join("\n");
+    const hover = ".tc-table--stack-md tbody tr:not(.tc-table__empty-row):not(.tc-table__skeleton-row):hover";
+    expect(declarations(narrow, hover).background).toBe("var(--tc-color-row-hover)");
+    expect(declarations(narrow, `${hover} > *`).background).toBe("transparent");
   });
 
   it("an empty table hides its header and drops its frame", () => {

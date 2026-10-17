@@ -1201,7 +1201,8 @@
   font-weight: var(--tc-weight-medium);
 }
 
-.tc-table tbody tr:hover > * {
+/* Data rows only: the empty-state and skeleton rows are not targets. */
+.tc-table tbody tr:not(.tc-table__empty-row):not(.tc-table__skeleton-row):hover > * {
   background: var(--tc-color-row-hover);
 }
 
@@ -1323,6 +1324,16 @@
 
   .tc-table--stack-md tbody tr:last-child {
     border-bottom: 0;
+  }
+
+  /* A stacked row is one padded block: tint the block itself, not the
+     cells (which would leave the row padding unpainted). */
+  .tc-table--stack-md tbody tr:not(.tc-table__empty-row):not(.tc-table__skeleton-row):hover {
+    background: var(--tc-color-row-hover);
+  }
+
+  .tc-table--stack-md tbody tr:not(.tc-table__empty-row):not(.tc-table__skeleton-row):hover > * {
+    background: transparent;
   }
 
   .tc-table--stack-md tbody th,
