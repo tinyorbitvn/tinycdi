@@ -315,6 +315,33 @@ describe("CreateWorkspacePage", () => {
     await waitFor(() => expect(name).not.toHaveAttribute("aria-invalid"));
   });
 
+  it("create: submitting a name that breaks the DNS-label pattern flags it and sends nothing", async () => {
+    const api = createMockApi();
+    loginCookies();
+    const calls = interceptCreates(api, null);
+    renderWithApi(<CreateWorkspacePage />, api);
+    await fillForm(TEMPLATE_LINUX.id);
+    const name = screen.getByLabelText(/^Name/);
+    // No blur: the submit alone must surface the inline error.
+    fireEvent.change(name, { target: { value: "Bad_Name" } });
+    expect(name).not.toHaveAttribute("aria-invalid");
+    const before = window.location.pathname;
+
+    fireEvent.click(screen.getByRole("button", { name: "Create workspace" }));
+    expect(
+      await screen.findByText("Use lowercase letters, digits and hyphens; start and end with a letter or digit."),
+    ).toHaveClass("tc-field__error");
+    expect(name).toHaveAttribute("aria-invalid", "true");
+    expect(calls).toHaveLength(0);
+    expect(window.location.pathname).toBe(before);
+
+    // A corrected name submits.
+    fireEvent.change(name, { target: { value: "good-name" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create workspace" }));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(JSON.parse(calls[0]!.rawBody).name).toBe("good-name");
+  });
+
   it("create: the form uses the Form layout and a back link", async () => {
     const api = createMockApi();
     loginCookies();
