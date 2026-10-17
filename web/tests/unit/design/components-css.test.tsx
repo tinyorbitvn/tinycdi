@@ -119,7 +119,19 @@ describe("links, dialog, empty state, tabs", () => {
     expect(declarations(design(), ".tc-tabs__list")["scroll-snap-type"]).toBe("x proximity");
     expect(declarations(design(), ".tc-tabs__tab")["scroll-snap-align"]).toBe("start");
     const narrow = mediaBlocks(raw, "(max-width: 47.99rem)").join("\n");
-    expect(declarations(narrow, ".tc-tabs__list")["mask-image"]).toContain("currentColor");
+    // No fade on the bare list: an edge with nothing hidden past it stays
+    // sharp, so the first/last tab's focus ring is never masked.
+    expect(declarations(narrow, ".tc-tabs__list")["mask-image"]).toBeUndefined();
+    expect(declarations(narrow, ".tc-tabs__list")["scroll-padding-inline"]).toBe("var(--tc-space-4)");
+    expect(declarations(narrow, ".tc-tabs__list[data-overflow-start]")["mask-image"]).toBe(
+      "linear-gradient(to right, transparent, currentColor var(--tc-space-4))",
+    );
+    expect(declarations(narrow, ".tc-tabs__list[data-overflow-end]")["mask-image"]).toBe(
+      "linear-gradient(to right, currentColor calc(100% - var(--tc-space-4)), transparent)",
+    );
+    expect(
+      declarations(narrow, ".tc-tabs__list[data-overflow-start][data-overflow-end]")["mask-image"],
+    ).toMatch(/^linear-gradient\(to right, transparent, .*, transparent\)$/);
   });
 });
 

@@ -1518,10 +1518,26 @@
   padding-top: var(--tc-space-6);
 }
 
-/* Narrow screens: the tab row scrolls; the edges fade to show there is more. */
+/* Narrow screens: the tab row scrolls; an edge fades only while more tabs
+   hide past it (Tabs sets data-overflow-start/-end), so the first and last
+   tab keep their whole focus ring. scroll-padding keeps a focused tab out
+   of a faded edge. */
 @media (max-width: 47.99rem) {
   .tc-tabs__list {
     scroll-padding-inline: var(--tc-space-4);
+  }
+
+  .tc-tabs__list[data-overflow-start] {
+    -webkit-mask-image: linear-gradient(to right, transparent, currentColor var(--tc-space-4));
+    mask-image: linear-gradient(to right, transparent, currentColor var(--tc-space-4));
+  }
+
+  .tc-tabs__list[data-overflow-end] {
+    -webkit-mask-image: linear-gradient(to right, currentColor calc(100% - var(--tc-space-4)), transparent);
+    mask-image: linear-gradient(to right, currentColor calc(100% - var(--tc-space-4)), transparent);
+  }
+
+  .tc-tabs__list[data-overflow-start][data-overflow-end] {
     -webkit-mask-image: linear-gradient(to right, transparent, currentColor var(--tc-space-4), currentColor calc(100% - var(--tc-space-4)), transparent);
     mask-image: linear-gradient(to right, transparent, currentColor var(--tc-space-4), currentColor calc(100% - var(--tc-space-4)), transparent);
   }

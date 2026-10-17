@@ -29,6 +29,29 @@ export function Tabs({ tabs, label, value, defaultValue, onChange, className }: 
   const [internal, setInternal] = useState(defaultValue ?? tabs.find((t) => !t.disabled)?.id ?? "");
   const selected = value ?? internal;
   const refs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const listRef = useRef<HTMLDivElement | null>(null);
+  // Which edges of the scrolling tab row hide more tabs. The narrow-screen
+  // edge fade applies only there, so a tab at either end of the row keeps
+  // its whole focus ring.
+  const [overflow, setOverflow] = useState({ start: false, end: false });
+
+  useEffect(() => {
+    const el = listRef.current;
+    if (!el) return;
+    const update = () => {
+      const start = el.scrollLeft > 1;
+      const end = el.scrollLeft < el.scrollWidth - el.clientWidth - 1;
+      setOverflow((prev) => (prev.start === start && prev.end === end ? prev : { start, end }));
+    };
+    update();
+    el.addEventListener("scroll", update, { passive: true });
+    const ro = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(update);
+    ro?.observe(el);
+    return () => {
+      el.removeEventListener("scroll", update);
+      ro?.disconnect();
+    };
+  }, [tabs.length]);
 
   // Keep the selected tab visible in the horizontally scrolling list (mobile
   // admin nav). No `behavior`: an instant scroll, so nothing animates for
@@ -59,7 +82,15 @@ export function Tabs({ tabs, label, value, defaultValue, onChange, className }: 
   const current = tabs.find((t) => t.id === selected);
   return (
     <div className={cx("tc-tabs", className)}>
-      <div role="tablist" aria-label={label} className="tc-tabs__list" onKeyDown={onKeyDown}>
+      <div
+        ref={listRef}
+        role="tablist"
+        aria-label={label}
+        className="tc-tabs__list"
+        onKeyDown={onKeyDown}
+        {...(overflow.start ? { "data-overflow-start": "" } : {})}
+        {...(overflow.end ? { "data-overflow-end": "" } : {})}
+      >
         {tabs.map((t) => {
           const isSel = t.id === selected;
           return (
