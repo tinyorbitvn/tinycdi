@@ -217,4 +217,40 @@ describe("data attach", () => {
     expect(alert).toHaveTextContent("You already have a workspace with this name. Choose a different name.");
     expect(alert).not.toHaveTextContent("already being attached");
   });
+
+  it("an unmapped error code leads with stable guidance, not the raw server message", async () => {
+    const api = createMockApi();
+    loginCookies();
+    const origHandle = api.handle;
+    api.handle = (req) => {
+      if (req.method === "POST" && req.path.endsWith(":attach")) {
+        return {
+          status: 500,
+          headers: { "content-type": "application/json" },
+          body: { error: {
+            code: "BRAND_NEW_CODE",
+            message: "raw server text",
+            retryable: true,
+            requestId: "req_new",
+          } },
+        };
+      }
+      return origHandle(req);
+    };
+    renderWithApi(<DataListPage />, api);
+
+    await screen.findByRole("table", { name: /retained/i });
+    fireEvent.click(within(retainedRow()).getByRole("button", { name: /^attach$/i }));
+    const dialog = await screen.findByRole("dialog");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: /attach disk/i }));
+    const alert = await within(dialog).findByRole("alert");
+    const title = alert.querySelector(".tc-alert__title");
+    expect(title).toHaveTextContent(
+      "The service could not complete the request; it is safe to retry.",
+    );
+    expect(title).not.toHaveTextContent("raw server text");
+    // The server message stays visible as secondary detail.
+    expect(alert).toHaveTextContent("raw server text");
+  });
 });
