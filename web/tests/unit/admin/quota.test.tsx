@@ -125,10 +125,13 @@ describe("quota: admin edit", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Save limits" }));
 
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
-    const meter = (
-      await screen.findByText("Running workspaces", { selector: ".tc-meter__label" })
-    ).closest(".tc-meter")!;
-    expect(meter).toHaveTextContent(/of 12/);
+    // The dialog closes as the save's reload starts: the old meter is still
+    // on screen, so wait for the reloaded value rather than reading it once.
+    await waitFor(() =>
+      expect(
+        screen.getByText("Running workspaces", { selector: ".tc-meter__label" }).closest(".tc-meter"),
+      ).toHaveTextContent(/of 12/),
+    );
   });
 
   it("a config-managed tenant shows the platform source and no edit action", async () => {
