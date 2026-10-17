@@ -174,6 +174,69 @@ func TestRenewLease_StaleObservationFailsClosed(t *testing.T) {
 	}
 }
 
+// TestLease_PastExpiryStillActiveIsExpired: a lease past expires_at whose
+// row still says 'active' (no renew or sweep has touched it yet) is dead on
+// every path. IssueTicket's advisory gate ignores it, so a plain ticket
+// issues without takeover and leaves the row alone; ReleaseIdleLease
+// refuses it and leaves the row to the lazy expiry; RenewLease answers
+// ErrRevoked and moves the row to 'expired' itself. The ticket then
+// redeems into a new lease.
+func TestLease_PastExpiryStillActiveIsExpired(t *testing.T) {
+	db, b, clock, src := setup(t)
+	seedWorkspace(t, db, "tenant-a", alice.Owner(), "ws-1")
+	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now()))
+	// Idle (claimed epoch, no open stream): only the expiry can refuse
+	// the release below.
+	old, epoch := idleLease(t, b, "ws-1")
+
+	clock.Advance(broker.LeaseTTL + time.Second)
+	src.set(readyBinding("ws-1", "tenant-a", alice.Owner(), 1, "rt-1", clock.Now())) // fresh observation
+	if state, closed := leaseState(t, db, old.ID); state != "active" || closed {
+		t.Fatalf("precondition: lease state=%q closed=%v, want active and open", state, closed)
+	}
+
+	tk, err := b.IssueTicket(ctx, alice, "ws-1", false, provisioning.SessionPolicy{}, testPortalSession)
+	if err != nil {
+		t.Fatalf("IssueTicket over a past-expiry lease without takeover = %v, want success", err)
+	}
+	if state, _ := leaseState(t, db, old.ID); state != "active" {
+		t.Fatalf("lease state=%q after IssueTicket, want active (the gate is advisory)", state)
+	}
+
+	released, err := b.ReleaseIdleLease(ctx, gwA, old.ID, fenceOf(old), epoch)
+	if err != nil || released {
+		t.Fatalf("ReleaseIdleLease of a past-expiry lease = %v, %v; want false, nil", released, err)
+	}
+	if state, _ := leaseState(t, db, old.ID); state != "active" {
+		t.Fatalf("lease state=%q after refused release, want active (expiry is the renew path's)", state)
+	}
+
+	if _, err := b.RenewLease(ctx, gwA, old.ID, fenceOf(old)); !errors.Is(err, broker.ErrRevoked) {
+		t.Fatalf("RenewLease of a past-expiry lease = %v, want ErrRevoked", err)
+	}
+	if state, closed := leaseState(t, db, old.ID); state != "expired" || !closed {
+		t.Fatalf("lease state=%q closed=%v after renew, want expired and closed", state, closed)
+	}
+	// Dead for good: a second renew and a release both refuse.
+	if _, err := b.RenewLease(ctx, gwA, old.ID, fenceOf(old)); !errors.Is(err, broker.ErrRevoked) {
+		t.Fatalf("second RenewLease = %v, want ErrRevoked", err)
+	}
+	if released, err := b.ReleaseIdleLease(ctx, gwA, old.ID, fenceOf(old), epoch); err != nil || released {
+		t.Fatalf("ReleaseIdleLease of an expired lease = %v, %v; want false, nil", released, err)
+	}
+
+	fresh, err := b.RedeemTicket(ctx, gwA, tk.Token)
+	if err != nil {
+		t.Fatalf("RedeemTicket after expiry: %v", err)
+	}
+	if fresh.ID == old.ID {
+		t.Fatal("redemption returned the expired lease")
+	}
+	if state, _ := leaseState(t, db, fresh.ID); state != "active" {
+		t.Fatalf("new lease state=%q, want active", state)
+	}
+}
+
 // TestSingleActiveLeaseAcrossGateways: the unique-active-lease invariant —
 // even with two takeover tickets redeemed by two gateway identities, exactly
 // one lease is ever active at a time.
