@@ -4,7 +4,7 @@ import { WorkspaceListPage } from "../../../src/workspaces/WorkspaceListPage";
 import { PhasePill } from "../../../src/workspaces/StatusBits";
 import { createMockApi, renderWithApi, loginCookies } from "../helpers";
 import { makeWorkspace, readyWorkspace } from "../../mock-api/fixtures.ts";
-import type { WorkspacePhase } from "../../../src/workspaces/helpers";
+import { templateRefLabel, type WorkspacePhase } from "../../../src/workspaces/helpers";
 
 const ALL_PHASES: WorkspacePhase[] = [
   "Pending",
@@ -166,6 +166,21 @@ describe("WorkspaceListPage", () => {
     expect(manage).toHaveAttribute("href", "/workspaces/ws_one");
     const pill = within(table).getByText("Ready").closest(".tc-badge")!;
     expect(pill.parentElement).toHaveClass("tc-cell-stack");
+  }, 20000);
+  it("list: the stacked mobile card shows the template beside name and phase", async () => {
+    const api = createMockApi();
+    api.state.workspaces.clear();
+    const ws = readyWorkspace({ id: "ws_one", name: "dev-box" });
+    api.state.workspaces.set("ws_one", ws);
+    loginCookies();
+    renderWithApi(<WorkspaceListPage pollIntervalMs={60_000} />, api);
+
+    const table = await screen.findByRole("table", { name: "workspaces" });
+    const row = within(table).getAllByRole("row")[1]!;
+    const template = within(row).getByText(templateRefLabel(ws.template)).closest("td")!;
+    expect(template).toHaveAttribute("data-label", "Template");
+    // Not hidden below the small breakpoint: the stacked card keeps it.
+    expect(template).not.toHaveClass("tc-table__cell--hide-sm");
   }, 20000);
 });
 

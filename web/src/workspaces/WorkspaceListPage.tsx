@@ -41,7 +41,6 @@ const COLUMNS: Column<WorkspaceView>[] = [
   {
     key: "template",
     header: t("workspaces.list.col.template"),
-    hideOnMobile: true,
     render: (w) => templateRefLabel(w.template),
   },
   {
