@@ -56,7 +56,14 @@ while read -r ref engine floor _; do
 
   if [ "$engine" != "none" ]; then
     ver="$(engine_version "$ref" "$engine" || true)"
-    major="$(echo "$ver" | grep -oE '[0-9]+(\.[0-9]+){2,3}' | head -1 | cut -d. -f1)"
+    # One retry: a cold container start occasionally prints nothing.
+    if [ -z "$ver" ]; then
+      sleep "${ENGINE_RETRY_DELAY:-5}"
+      ver="$(engine_version "$ref" "$engine" || true)"
+    fi
+    # `|| true`: with pipefail, a version string grep cannot parse would
+    # otherwise end the script here, silently, before the error below.
+    major="$(echo "$ver" | grep -oE '[0-9]+(\.[0-9]+){2,3}' | head -1 | cut -d. -f1 || true)"
     echo "    engine version: ${ver:-<none>} (major=${major:-?})"
     if [ -z "$major" ]; then
       err "$ref: could not determine $engine version"
