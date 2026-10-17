@@ -163,13 +163,16 @@ export function QuotaEditDialog({
   // edit made right as a reload painted and silently undo it. While open,
   // the fields are therefore always read from `quota`, so quota.etag is the
   // If-Match that makes a concurrent write 412 instead of being overwritten.
+  // The save error is cleared only when the dialog opens: a 412 reloads the
+  // quota, and its "reloaded, review and retry" warning must stay visible
+  // while the fresh values land.
   const [shown, setShown] = useState({ open, quota });
   if (shown.open !== open || shown.quota !== quota) {
     setShown({ open, quota });
     if (open) {
       setFields(fieldsOf(quota));
       setInvalid(false);
-      setSaveError(null);
+      if (!shown.open) setSaveError(null);
     }
   }
 

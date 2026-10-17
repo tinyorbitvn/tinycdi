@@ -201,6 +201,8 @@ describe("quota: optimistic concurrency", () => {
     await waitFor(() =>
       expect(within(dialog).getByLabelText(/Running workspaces/)).toHaveValue(20),
     );
+    // The warning explains why the values changed, so it outlives the reload.
+    expect(within(dialog).getByText(/changed these limits/)).toBeInTheDocument();
 
     // Saving again carries the fresh version and lands.
     fireEvent.click(within(dialog).getByRole("button", { name: "Save limits" }));
