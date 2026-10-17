@@ -266,6 +266,43 @@ describe("design/Table stackBelow", () => {
     expect(onRowClick).toHaveBeenCalledWith(rows[0]);
   });
 
+  it("restates table semantics as explicit roles when stacked", () => {
+    const { container } = render(
+      <Table caption="rows" columns={cols} rows={rows} rowKey={(r) => r.id} stackBelow="md" />,
+    );
+    const table = container.querySelector("table")!;
+    expect(table).toHaveAttribute("role", "table");
+    expect(screen.getByRole("table", { name: "rows" })).toBe(table);
+    for (const group of table.querySelectorAll("thead, tbody")) expect(group).toHaveAttribute("role", "rowgroup");
+    for (const tr of table.querySelectorAll("tr")) expect(tr).toHaveAttribute("role", "row");
+    for (const th of table.querySelectorAll("thead th")) expect(th).toHaveAttribute("role", "columnheader");
+    for (const th of table.querySelectorAll("tbody th")) expect(th).toHaveAttribute("role", "rowheader");
+    for (const td of table.querySelectorAll("tbody td")) expect(td).toHaveAttribute("role", "cell");
+    expect(screen.getAllByRole("columnheader")).toHaveLength(3);
+    expect(screen.getByRole("rowheader")).toHaveTextContent("alpha");
+  });
+
+  it("gives stacked empty and skeleton rows the same roles", () => {
+    const { container, rerender } = render(
+      <Table caption="rows" columns={cols} rows={[] as Row[]} rowKey={(r) => r.id} stackBelow="md" empty="none" />,
+    );
+    const empty = container.querySelector(".tc-table__empty-row")!;
+    expect(empty).toHaveAttribute("role", "row");
+    expect(empty.querySelector("td")).toHaveAttribute("role", "cell");
+    rerender(
+      <Table caption="rows" columns={cols} rows={[] as Row[]} rowKey={(r) => r.id} stackBelow="md" loading />,
+    );
+    for (const tr of container.querySelectorAll(".tc-table__skeleton-row")) {
+      expect(tr).toHaveAttribute("role", "row");
+      for (const td of tr.querySelectorAll("td")) expect(td).toHaveAttribute("role", "cell");
+    }
+  });
+
+  it("adds no explicit roles to an unstacked table", () => {
+    const { container } = render(<Table caption="rows" columns={cols} rows={rows} rowKey={(r) => r.id} />);
+    expect(container.querySelector("[role]")).toBeNull();
+  });
+
   it("stacks only below 768px and lets long values wrap", () => {
     const narrow = mediaBlocks(readWeb("src/design/design.css"), "(max-width: 47.99rem)").join("\n");
     expect(declarations(narrow, ".tc-table--stack-md thead").position).toBe("absolute");
