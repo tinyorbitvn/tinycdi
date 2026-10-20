@@ -622,7 +622,7 @@ jobs:
 
       - name: download linux-base tar (profile legs, dry_run)
         if: ${{ (matrix.image == 'browser' || matrix.image == 'linux-desktop') && needs.prepare.outputs.dry_run == 'true' }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: image-tar-linux-base
           path: /tmp
@@ -778,7 +778,7 @@ jobs:
       - name: download this image's ref
         # SUPF-1: fetch only this leg's artifact by exact name — a merged
         # pattern download could be poisoned by a forged artifact.
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: image-ref-${{ matrix.image }}
           path: refs
@@ -801,7 +801,7 @@ jobs:
 
       - name: download image tar (dry-run)
         if: env.SCAN_MODE == 'tar'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: image-tar-${{ matrix.image }}
           path: /tmp
