@@ -37,7 +37,7 @@ COPY cmd/tcdi-xferd/ ./cmd/tcdi-xferd/
 COPY internal/xferd/ ./internal/xferd/
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/tcdi-xferd ./cmd/tcdi-xferd
 
-FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 
 ARG KASMVNC_VERSION=1.5.0
 ARG KASMVNC_DEB_SHA256=770fd3df51510beecc89666879d82faf411276e68c6e11df612f736b891b5f71
