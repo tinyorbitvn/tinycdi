@@ -60,7 +60,7 @@ Pinned inputs (`docs/compatibility.md`):
 - base: `debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251`
 - KasmVNC: `kasmvncserver_bookworm_1.5.0_amd64.deb`, sha256 `770fd3df51510beecc89666879d82faf411276e68c6e11df612f736b891b5f71`
 - Chromium: `155.0.8059.79-1~deb12u1` (apt pin — repin on Debian security updates)
-- Firefox ESR (fallback): `153.5.0esr-1~deb12u1` (apt pin; the same pin in `tcdi/browser`, where it is the fallback browser, and in `tcdi/linux-desktop`, where it is the desktop's browser — one pinned source, bumped together)
+- Firefox ESR (fallback): `153.5.1esr-1~deb12u1` (apt pin; the same pin in `tcdi/browser`, where it is the fallback browser, and in `tcdi/linux-desktop`, where it is the desktop's browser — one pinned source, bumped together)
 
 ## Published runtime images (release train)
 

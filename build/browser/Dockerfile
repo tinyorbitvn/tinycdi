@@ -22,7 +22,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 # apt pins per docs/compatibility.md (browser pins) and the locked
 # firefox-esr deb.
 ARG CHROMIUM_APT_VERSION=155.0.8059.79-1~deb12u1
-ARG FIREFOX_ESR_APT_VERSION=153.5.0esr-1~deb12u1
+ARG FIREFOX_ESR_APT_VERSION=153.5.1esr-1~deb12u1
 
 USER root
 RUN apt-get update \
